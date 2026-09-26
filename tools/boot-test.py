@@ -526,6 +526,12 @@ SESSION_APP_ID = "calculator"
 # had its session back, an entry no machine has, and the lines of the journal to compare before and
 # after, which are the ones restoring has to put back
 SESSION_NOTE = "$XDG_RUNTIME_DIR/lens-restored"
+# the second app of the session that comes back, on a workspace of its own. three apps, not three
+# windows of one app: an app that keeps one process for all its windows is asked for the second one
+# by a message to the process that is already running, and ghostty in this image answers the first
+# such message and not a second one, so a session of two terminals comes back as one terminal
+SESSION_OTHER = "Characters"
+SESSION_OTHER_ID = "characters"
 SESSION_STRANGER = "com.example.NotHere"
 SESSION_PLACE = ("app", "workspace", "column", "tile")
 # the console, from nix/modules/horizon.nix: ghostty's background, the height the window rule gives
@@ -7476,33 +7482,40 @@ def main():
             # compositor has no action that opens an app in a column, and needs none: a new window
             # opens as a column of its own beside the one with the keyboard, so starting the apps one
             # at a time, workspace by workspace and left to right, puts the columns back. three
-            # windows over two workspaces say it: two terminals side by side on the first, and an app
-            # of its own on the second
+            # windows of three apps say it: a terminal and an app side by side on the first workspace,
+            # and another app of its own on the second
             session_ours = []
-            for number in (1, 2):
-                already = {win[0] for win in app_windows(MENU_APP_ID, "the terminals open now")}
-                run("horizon msg action spawn -- ghostty", f"terminal {number} of the session to come back")
-                found = wait_for(180, lambda: next(
-                    (win[0] for win in app_windows(MENU_APP_ID, f"terminal {number}")
-                     if win[0] not in already), None))
-                if not found:
-                    _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
-                    fail(f"the compositor started no terminal {number}: "
-                         f"{without_console(output).strip()[-800:]!r}")
-                session_ours.append(found)
-            open_from_menu(SESSION_APP, SESSION_APP_ID)
-            session_calc = app_windows(SESSION_APP_ID, f"{SESSION_APP}'s window")
-            if not session_calc:
-                fail(f"{SESSION_APP} opened no window of its own")
-            session_ours.append(session_calc[0][0])
-            # and onto the second workspace, which is the empty one the compositor keeps at the end
-            run(f"horizon msg action move-window-to-workspace --window-id {session_calc[0][0]} 2",
-                f"{SESSION_APP} onto the second workspace")
+            # a terminal the compositor spawned, which is in no scope of a session's, so the entry
+            # the journal names it by comes from the app id its window carries
+            session_already = {win[0] for win in app_windows(MENU_APP_ID, "the terminals open now")}
+            run("horizon msg action spawn -- ghostty", "a terminal for the session to come back")
+            session_terminal = wait_for(180, lambda: next(
+                (win[0] for win in app_windows(MENU_APP_ID, "the terminal of the session")
+                 if win[0] not in session_already), None))
+            if not session_terminal:
+                _, output = run("journalctl --user -b -o cat -n 30 | cat", "the user manager's log")
+                fail(f"the compositor started no terminal for the session: "
+                     f"{without_console(output).strip()[-800:]!r}")
+            session_ours.append(session_terminal)
+            # and two apps from the Applications menu, each in a scope of the shell's named after the
+            # entry it came from
+            for session_name, session_id in ((SESSION_APP, SESSION_APP_ID),
+                                             (SESSION_OTHER, SESSION_OTHER_ID)):
+                open_from_menu(session_name, session_id)
+                session_window = app_windows(session_id, f"{session_name}'s window")
+                if not session_window:
+                    fail(f"{session_name} opened no window of its own")
+                session_ours.append(session_window[0][0])
+            # the last of them onto the second workspace, which is the empty one the compositor keeps
+            # at the end of the row
+            run(f"horizon msg action move-window-to-workspace --window-id {session_ours[-1]} 2",
+                f"{SESSION_OTHER} onto the second workspace")
 
             def session_ours_now(what):
-                """The windows of the two terminals and the app, however they were opened."""
+                """The windows of the terminal and the two apps, however they were opened."""
                 return [win for win in open_windows(what)
-                        if MENU_APP_ID in win[1].lower() or SESSION_APP_ID in win[1].lower()]
+                        if any(name in win[1].lower()
+                               for name in (MENU_APP_ID, SESSION_APP_ID, SESSION_OTHER_ID))]
 
             def session_restored(said):
                 """How many windows the shell says came back, or None while it has said no number."""
@@ -7521,7 +7534,7 @@ def main():
                 "the journal with the three windows of the session in it")
             if len(session_before) != 3:
                 fail(f"the journal names {[win.get('window') for win in session_before]}, expected the "
-                     "two terminals and the app")
+                     "terminal and the two apps")
             session_wanted = session_places(session_before)
             if len({place[1] for place in session_wanted}) != 2:
                 fail(f"the journal puts all three windows on one workspace: {session_wanted}")
