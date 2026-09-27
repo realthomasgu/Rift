@@ -1541,21 +1541,32 @@ def main():
                     "key: add it as a remote, install its app from Welcome and run it with the portals")
     ap.add_argument("--offline", help="boot with no network card, check Welcome opens on the page that says so, save "
                     "its screendump as this png, and that it opens again after Open later and a reboot")
+    ap.add_argument("--tpm", help="give the machine a software tpm, seal a key for persist to it from the owned "
+                    "machine's shell, and boot the same drive five times: with the key, on another machine's tpm, "
+                    "back on its own, and after the key is wiped. This directory holds the tpm state")
     args = ap.parse_args()
     if args.boot_style and not args.splash:
         ap.error("--boot-style needs --splash, which names the png its screendumps are saved beside")
+    if args.tpm and args.first_boot:
+        ap.error("--tpm writes the drive with its persist, so it does not go with --first-boot")
     with open(args.passfile, encoding="utf-8") as f:
         passphrase = f.read()
 
     work = tempfile.mkdtemp(prefix="rift-boot-")
-    if (args.splash or args.desktop or args.updates or args.first_boot or args.boot_style or args.offline) \
-            and not args.qmp:
+    if (args.splash or args.desktop or args.updates or args.first_boot or args.boot_style or args.offline
+            or args.tpm) and not args.qmp:
         args.qmp = os.path.join(work, "qmp.sock")
 
     # the app picks kvm or tcg and the firmware. what follows its options replaces its defaults.
     # the gpu is virtio: the firmware draws the splash on it and horizon opens it as a drm device.
     # with --first-boot rift-flash leaves persist out and the drive asks for the passphrase
     drive = ["--first-boot"] if args.first_boot else ["--persist", os.path.abspath(args.passfile)]
+    # the tpm run boots the same drive again and again, so the drive is written into a file that
+    # stays behind, and each boot is given the tpm state of the machine it is pretending to be
+    kept = os.path.abspath(os.path.join(args.tpm, "drive.img")) if args.tpm else None
+    if args.tpm:
+        os.makedirs(args.tpm, exist_ok=True)
+        drive += ["--drive", kept, "--tpm", os.path.abspath(os.path.join(args.tpm, "own"))]
     if args.models:
         drive += ["--models", os.path.abspath(args.models)]
     if args.exchange:
@@ -2028,6 +2039,185 @@ def main():
         open_settings()
         owner_kept(OWNER_NAME, PASSWORD, OWNER_NEW_PASSWORD)
         reboot_action("shutdown")
+        power_off()
+        print(f"\nboot-test: PASSED in {since()}", flush=True)
+        return
+
+    # 1e. auto-unlock: a key for persist sealed to this machine's tpm, so the drive opens without
+    # its passphrase on a machine the owner has said is theirs (ADR-0080). The same drive is booted
+    # five times: here with nothing sealed, again once a key is, on another machine's tpm, back on
+    # its own, and after the key is wiped. The passphrase slot is never touched, so every boot that
+    # asks for it opens with it
+    if args.tpm:
+        own = os.path.abspath(os.path.join(args.tpm, "own"))
+        other = os.path.abspath(os.path.join(args.tpm, "other"))
+
+        def tpm_there():
+            """Whether the kernel found a tpm on this machine."""
+            status, output = run("echo tpms=(ls /sys/class/tpm | count)", "the tpms the kernel found")
+            found = re.search(r"tpms=(\d+)", without_console(output))
+            return status == 0 and found is not None and int(found.group(1)) > 0
+
+        def auto_unlock(what):
+            """What rift host auto-unlock says about the drive, as one line."""
+            status, output = run("rift host auto-unlock", what)
+            said = " ".join(without_console(output).split())
+            if status != 0:
+                fail(f"rift host auto-unlock failed {what}: {said!r}")
+            return said
+
+        def sealed_tokens(what):
+            """How many keys sealed to a tpm the header of persist holds."""
+            status, output = run("echo tokens=(sudo cryptsetup luksDump --dump-json-metadata "
+                                 "/dev/disk/by-partlabel/persist | grep -o systemd-tpm2 | count)",
+                                 what)
+            found = re.search(r"tokens=(\d+)", without_console(output))
+            if status != 0 or not found:
+                fail(f"could not count the sealed keys {what}: {without_console(output).strip()!r}")
+            return int(found.group(1))
+
+        def passphrase_still_opens(what):
+            """The one rule that never bends: the passphrase opens persist, whatever else does."""
+            status, output = run(f"printf '%s' '{passphrase}' | sudo cryptsetup open --test-passphrase "
+                                 "--key-file - /dev/disk/by-partlabel/persist", what)
+            if status != 0:
+                fail(f"the passphrase no longer opens persist {what}: "
+                     f"{without_console(output).strip()[-300:]!r}")
+
+        def seal(what):
+            """rift host auto-unlock on, with the passphrase typed where it is asked for. The
+            command reads it off the terminal with the echo off, the way a person types it."""
+            child.send("rift host auto-unlock on\r")
+            expect([COMMAND_START], f"the shell to start {what}")
+            expect([r"Type this drive's passphrase:"], f"the question for the drive's passphrase {what}")
+            child.send(passphrase + "\r")
+            expect([COMMAND_END], what)
+            status = int(child.match.group(1))
+            return status, " ".join(without_console(ESCAPES.sub("", child.before).replace("\r", "")).split())
+
+        def boot_again(tpm_dir, machine, passphrase_wanted):
+            """Boot the kept drive in a qemu of its own with this tpm state beside it, and check
+            whether it asks for the passphrase. The command line is the first boot's with the drive
+            and the tpm swapped, so every device is the same one: the fingerprint Orbit reads comes
+            from the machine's dmi strings and pci ids, and the tpm's state is then the only thing
+            that differs between this machine and another."""
+            nonlocal child
+            again = []
+            values = ("--persist", "--models", "--exchange", "--drive", "-qmp")
+            skip = False
+            for arg in cmd:
+                if skip:
+                    skip = False
+                    continue
+                if arg in values:
+                    skip = True
+                elif arg == "--image":
+                    again += ["--image", kept]
+                    skip = True
+                elif arg == "--tpm":
+                    again += ["--tpm", tpm_dir]
+                    skip = True
+                else:
+                    again.append(arg)
+            print("\nboot-test: " + " ".join(again), flush=True)
+            child = pexpect.spawn(again[0], again[1:], encoding="utf-8", codec_errors="replace",
+                                  dimensions=(40, 160))
+            child.logfile_read = tee
+            asked = expect([PROMPT, PASSPHRASE], f"the boot on {machine}") == 1
+            if asked != passphrase_wanted:
+                want = "ask for the passphrase" if passphrase_wanted else "open without the passphrase"
+                fail(f"the boot on {machine} did not {want}")
+            if asked:
+                unlock()
+            ok(f"the boot on {machine} " + ("asked for the passphrase" if asked else "opened without the passphrase"))
+
+        # the drive as it comes: nothing is sealed, and the machine is one it has never seen
+        if not tpm_there():
+            fail("the vm has no tpm, so --tpm has nothing to seal a key to")
+        ok("the machine has a tpm")
+        said = auto_unlock("what the drive does at boot before anything is sealed")
+        if "asks for its passphrase at every boot" not in said or "auto-unlock on" not in said:
+            fail(f"rift host auto-unlock says {said!r} before anything is sealed")
+        if sealed_tokens("before anything is sealed") != 0:
+            fail("the header holds a key sealed to a tpm before anything sealed one")
+        ok(f"nothing is sealed yet: {said!r}")
+
+        # a borrowed machine may not hold a key, and asking does not change the drive
+        _, output = run("rift host class", "the class of this machine")
+        if "borrowed" not in without_console(output):
+            fail(f"a machine the owner has said nothing about is {without_console(output).strip()!r}, expected borrowed")
+        status, output = run("rift host auto-unlock on", "sealing a key on a borrowed machine")
+        refused = " ".join(without_console(output).split())
+        if status == 0 or "said is theirs" not in refused or "rift host set class owned" not in refused:
+            fail(f"a borrowed machine sealed a key, or refused with {refused!r}")
+        if sealed_tokens("after a borrowed machine was refused") != 0:
+            fail("the refusal on a borrowed machine sealed a key anyway")
+        ok(f"a borrowed machine is refused and nothing is sealed: {refused!r}")
+
+        # the owner says this machine is theirs, and then a key is sealed to its tpm
+        status, output = run("rift host set class owned", "saying this machine is the owner's")
+        if status != 0 or "class is owned" not in without_console(output):
+            fail(f"rift host set class owned said {without_console(output).strip()!r}")
+        status, said = seal("sealing a key to this machine's tpm")
+        if status != 0 or "now opens by itself on this machine" not in said:
+            fail(f"sealing a key said {said!r}")
+        if "passphrase still opens it" not in said:
+            fail(f"sealing a key did not say the passphrase still opens the drive: {said!r}")
+        ok(f"a key is sealed to this machine's tpm: {said!r}")
+        if sealed_tokens("after a key was sealed") != 1:
+            fail("the header does not hold exactly one key sealed to a tpm after one was sealed")
+        passphrase_still_opens("after a key was sealed")
+        said = auto_unlock("what the drive does at boot with a key sealed to this machine")
+        if "opens by itself on this machine" not in said:
+            fail(f"rift host auto-unlock says {said!r} with a key sealed to this machine")
+        ok(f"the drive says it opens by itself here, and its passphrase still opens it: {said!r}")
+
+        # asking again changes nothing, and leaves one key and not two
+        status, output = run("rift host auto-unlock on", "sealing a key that is already sealed")
+        if status != 0 or "already opens by itself" not in without_console(output):
+            fail(f"sealing a key twice said {without_console(output).strip()!r}")
+        if sealed_tokens("after sealing twice") != 1:
+            fail("sealing a key twice left more than one in the header")
+        ok("sealing a key that is already sealed says so and leaves the one there is")
+
+        # the boot that is the whole point: the drive opens with nothing typed
+        reboot_action("reset")
+        child.send("sudo systemctl reboot\r")
+        if expect([PROMPT, PASSPHRASE], "the boot after a key was sealed") == 1:
+            fail("the boot after a key was sealed asked for the passphrase")
+        ok("the boot after a key was sealed opened without the passphrase")
+        said = auto_unlock("what the drive says after it opened by itself")
+        if "opens by itself on this machine" not in said:
+            fail(f"after opening by itself the drive says {said!r}")
+        passphrase_still_opens("on the boot that opened by itself")
+        ok(f"and says so, with the passphrase still working: {said!r}")
+        reboot_action("shutdown")
+        power_off()
+
+        # the same drive on another machine's tpm: a state directory of its own, so the tpm has a
+        # seed of its own and nothing in it can unseal what the header holds
+        boot_again(other, "another machine's tpm", passphrase_wanted=True)
+        passphrase_still_opens("on another machine's tpm")
+        power_off()
+
+        # and back on its own machine, where it opens by itself again
+        boot_again(own, "its own machine again", passphrase_wanted=False)
+        status, output = run("rift host auto-unlock off", "wiping the sealed key")
+        wiped = " ".join(without_console(output).split())
+        if status != 0 or "asks for its passphrase at every boot again" not in wiped:
+            fail(f"wiping the sealed key said {wiped!r}")
+        if sealed_tokens("after the key was wiped") != 0:
+            fail("the header still holds a key sealed to a tpm after it was wiped")
+        passphrase_still_opens("after the key was wiped")
+        ok(f"the key is wiped: {wiped!r}")
+        power_off()
+
+        # the boot after the wipe asks for the passphrase, on the machine that held the key
+        boot_again(own, "its own machine after the key was wiped", passphrase_wanted=True)
+        said = auto_unlock("what the drive says after the key was wiped")
+        if "asks for its passphrase at every boot" not in said:
+            fail(f"after the key was wiped the drive says {said!r}")
+        ok(f"and says so: {said!r}")
         power_off()
         print(f"\nboot-test: PASSED in {since()}", flush=True)
         return

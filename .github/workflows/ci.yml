@@ -550,6 +550,18 @@ jobs:
         run: |
           python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --boot-style \
             --log boot-style.log --splash boot-style-splash.png --timeout 1200
+      - name: Boot with a software tpm
+        # a key for persist sealed to the machine's tpm, so an owned machine opens the drive with
+        # nothing typed. swtpm keeps each machine's tpm in a directory, and the same drive is booted
+        # five times: before a key is sealed, after, on another machine's tpm, back on its own, and
+        # after the key is wiped. The disks the boots above needed are gone by here, which leaves
+        # room for the drive this one keeps between its boots
+        run: |
+          rm -f clone.img updates.img stick.img locked.img backup.img
+          df -h .
+          python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --tpm tpmstate \
+            --log tpm.log --timeout 1800
+          rm -rf tpmstate/drive.img
       - uses: actions/upload-artifact@v4
         if: always()
         continue-on-error: true
@@ -560,6 +572,7 @@ jobs:
             first-boot.log
             graphical.log
             boot-style.log
+            tpm.log
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: always()
