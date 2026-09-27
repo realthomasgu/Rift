@@ -6,12 +6,15 @@
 //! write the word on the esp that says how the next boot looks, and `Slots` says what the drive's
 //! two slots hold. The owner's name and password are kept on persist through the bus, and `vault
 //! owner` puts what is kept there into the password files, at every boot and after a change.
+//! `vault enroll-key` adds a security key that opens persist, which needs a terminal: the key is
+//! touched and its pin is typed while it waits.
 
 mod backup;
 mod boot;
 mod bus;
 mod clone;
 mod exchange;
+mod keys;
 mod owner;
 mod restore;
 mod slots;
@@ -26,6 +29,7 @@ use backup::Backups;
 use boot::Esp;
 use clone::Cloner;
 use exchange::Exchange;
+use keys::Keys;
 use restore::Source;
 use slots::Drive;
 use timeline::{Keep, Timeline};
@@ -72,6 +76,8 @@ enum Command {
     Owner,
     /// Mount the drive's own exchange partition, when it has one.
     Exchange,
+    /// Add the security key that is plugged in, as root in a terminal.
+    EnrollKey,
     /// The copy a restore runs as the account that asked for it. `serve` starts it.
     RestoreFile {
         from: PathBuf,
@@ -88,6 +94,7 @@ struct Args {
     esp: Esp,
     drive: Drive,
     sealed: Sealed,
+    keys: Keys,
     home: PathBuf,
     replace: bool,
 }
@@ -101,6 +108,7 @@ fn main() -> ExitCode {
         esp,
         drive,
         sealed,
+        keys,
         home,
         replace,
     } = match parse_args(std::env::args().skip(1)) {
@@ -114,7 +122,7 @@ fn main() -> ExitCode {
     };
 
     let result = match command {
-        Command::Serve => bus::serve(timeline, backups, home, esp, drive, sealed)
+        Command::Serve => bus::serve(timeline, backups, home, esp, drive, sealed, keys)
             .map_err(|e| format!("vault: could not answer on the system bus: {e}")),
         Command::Take => took(&timeline),
         Command::Prune => pruned(&timeline),
@@ -152,6 +160,7 @@ fn main() -> ExitCode {
                 println!("{line}");
             }
         }),
+        Command::EnrollKey => enroll_key(&keys),
         Command::Exchange => Exchange::default().mount().map(|said| {
             println!(
                 "{}",
@@ -199,6 +208,7 @@ fn command_of(
             ["backups"] => Command::Backups,
             ["owner"] => Command::Owner,
             ["exchange"] => Command::Exchange,
+            ["enroll-key"] => Command::EnrollKey,
             ["clone", disk] => Command::Clone {
                 disk: PathBuf::from(disk),
                 serial: serial.take(),
@@ -353,6 +363,45 @@ fn clone_drive(cloner: &Cloner, disk: &Path, serial: Option<&str>) -> Result<(),
     Ok(())
 }
 
+/// Adds the security key that is plugged in, once the person has typed the drive's passphrase and
+/// touched the key. systemd-cryptenroll gets this terminal, because it asks for the key's pin on it
+/// and waits there for the touch.
+fn enroll_key(keys: &Keys) -> Result<(), String> {
+    if !rustix::process::geteuid().is_root() {
+        return Err(
+            "Adding a security key writes the drive's header, so it needs root. Run sudo rift host \
+             enroll-key."
+                .into(),
+        );
+    }
+    if keys::plugged_in().map_err(|why| why.why())?.is_empty() {
+        return Err(librift::vault::NO_SECURITY_KEY.to_string());
+    }
+    let passphrase = read_line("Type this drive's passphrase: ", true)?;
+    if passphrase.is_empty() {
+        return Err(
+            "A security key is added with the passphrase that already opens the drive, so it \
+             cannot be empty."
+                .into(),
+        );
+    }
+    keys.enroll(&passphrase, || {
+        println!("Touch the security key when it lights up.");
+    })
+    .map_err(|why| why.why())?;
+    let added = keys.list()?;
+    println!("This drive opens with that security key now.");
+    if let Some(key) = added.last() {
+        println!(
+            "It is keyslot {}, and it asks for {} at boot.",
+            key.slot,
+            key.asks()
+        );
+    }
+    println!("Its passphrase still opens it, with the key or without it.");
+    Ok(())
+}
+
 /// The drive the running system started from, which `serve` answers questions about.
 fn running_drive() -> Drive {
     Drive::new(
@@ -411,6 +460,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
     // a key sealed to this machine's tpm, with its note beside the backup target and the
     // passphrase handed over on the tmpfs
     let sealed = Sealed::new(Path::new(PERSIST), &state, &run);
+    // the security keys of the same partition, with the passphrase handed over the same way
+    let keys = Keys::new(Path::new(PERSIST), &run);
     // persist's top is where the snapshotted subvolume is
     let persist = subvolume
         .parent()
@@ -429,6 +480,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
         esp: Esp::new(PathBuf::from(DESIGNATORS), PathBuf::from(RUN)),
         drive: running_drive(),
         sealed,
+        keys,
         cloner: Cloner {
             persist,
             snapshots: snapshots.with_file_name("clone"),
@@ -471,7 +523,8 @@ fn usage() {
     println!(
         "  owner            Put the owner's name and password persist keeps into the password files"
     );
-    println!("  exchange         Mount the drive's own exchange partition, when it has one\n");
+    println!("  exchange         Mount the drive's own exchange partition, when it has one");
+    println!("  enroll-key       Add the security key that is plugged in to this drive\n");
     println!("Options:");
     println!("  --subvolume <dir>  What is snapshotted (default {SUBVOLUME})");
     println!("  --snapshots <dir>  Where the snapshots go (default {SNAPSHOTS})");

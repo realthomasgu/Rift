@@ -1,6 +1,7 @@
 //! Vault from a client's side: the snapshots Timeline keeps of home, the backups on the backup
 //! disk and where they go, making them, restoring a file from one, the boot style on the drive's
-//! esp, which only root can write, and whether this machine's tpm opens the drive by itself.
+//! esp, which only root can write, whether this machine's tpm opens the drive by itself, and which
+//! security keys open it.
 
 use std::path::{Path, PathBuf};
 #[cfg(feature = "bus")]
@@ -41,6 +42,11 @@ const SLOTS_TIMEOUT: Duration = Duration::from_secs(60);
 /// which is argon2id over the passphrase, and then talks to the tpm.
 #[cfg(feature = "bus")]
 const SEAL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long reading or removing a security key may take. Both are header edits; removing one
+/// rewrites the metadata and takes its lock.
+#[cfg(feature = "bus")]
+const KEYS_TIMEOUT: Duration = Duration::from_secs(60);
 
 const HOUR: i64 = 3600;
 const DAY: i64 = 24 * HOUR;
@@ -464,9 +470,136 @@ pub fn set_auto_unlock(on: bool, passphrase: &str) -> Result<(), String> {
         .map_err(|e| bus::sentence(vault, e))
 }
 
+/// One security key that opens the drive, as the header holds it.
+///
+/// A key is not a property of a machine: it is a thing the owner carries with the drive, and the
+/// header is the only place that says a key was enrolled. Which key it is has no name, because
+/// systemd's token holds none, so a key is the keyslot its own key sits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecurityKey {
+    /// The keyslot the key opens, which is what removes it.
+    pub slot: u32,
+    /// Whether the key asks for its pin at boot.
+    pub pin: bool,
+    /// Whether the key has to be touched at boot.
+    pub presence: bool,
+}
+
+impl SecurityKey {
+    /// What the key asks for at boot, as the end of a sentence.
+    #[must_use]
+    pub fn asks(&self) -> &'static str {
+        match (self.pin, self.presence) {
+            (true, true) => "its PIN and a touch",
+            (true, false) => "its PIN",
+            (false, true) => "a touch",
+            (false, false) => "nothing",
+        }
+    }
+}
+
+/// Why there is no security key to enroll. Both halves are needed: the first says what is wrong
+/// and the second what to do about it.
+pub const NO_SECURITY_KEY: &str = "No security key is plugged in, so there is nothing to \
+                                   enroll. Plug one in and run it again.";
+
+/// Why a keyslot cannot be removed as a security key.
+#[must_use]
+pub fn not_a_security_key(slot: u32) -> String {
+    format!(
+        "Keyslot {slot} does not hold a security key. rift host keys lists the keyslots that do."
+    )
+}
+
+/// What the keys the drive holds read as: one line each, or one sentence when there are none.
+#[must_use]
+pub fn keys_read_as(keys: &[SecurityKey]) -> Vec<String> {
+    if keys.is_empty() {
+        return vec!["No security key opens this drive.".to_string()];
+    }
+    keys.iter()
+        .map(|key| {
+            format!(
+                "Keyslot {}, which asks for {} at boot.",
+                key.slot,
+                key.asks()
+            )
+        })
+        .collect()
+}
+
+/// Which security keys open the drive, oldest keyslot first.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, when the caller is neither the owner nor root,
+/// or when the header could not be read.
+#[cfg(feature = "bus")]
+pub fn security_keys() -> Result<Vec<SecurityKey>, String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(KEYS_TIMEOUT)?;
+    let keys: Vec<(u32, bool, bool)> = bus::proxy(&connection, vault)?
+        .call("SecurityKeys", &())
+        .map_err(|e| bus::sentence(vault, e))?;
+    Ok(keys
+        .into_iter()
+        .map(|(slot, pin, presence)| SecurityKey {
+            slot,
+            pin,
+            presence,
+        })
+        .collect())
+}
+
+/// Takes the security key in `slot` off the drive. The passphrase slot is never one of these, so
+/// the drive still opens with it.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, when the caller is neither the owner nor root,
+/// or when that keyslot holds no security key.
+#[cfg(feature = "bus")]
+pub fn remove_security_key(slot: u32) -> Result<(), String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(KEYS_TIMEOUT)?;
+    bus::proxy(&connection, vault)?
+        .call("RemoveSecurityKey", &(slot))
+        .map_err(|e| bus::sentence(vault, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_security_key_says_what_it_asks_for() {
+        let key = |pin, presence| SecurityKey {
+            slot: 2,
+            pin,
+            presence,
+        };
+        assert_eq!(key(true, true).asks(), "its PIN and a touch");
+        assert_eq!(key(true, false).asks(), "its PIN");
+        assert_eq!(key(false, true).asks(), "a touch");
+        assert_eq!(key(false, false).asks(), "nothing");
+        assert_eq!(keys_read_as(&[]), ["No security key opens this drive."]);
+        assert_eq!(
+            keys_read_as(&[
+                key(true, true),
+                SecurityKey {
+                    slot: 3,
+                    pin: false,
+                    presence: true
+                }
+            ]),
+            [
+                "Keyslot 2, which asks for its PIN and a touch at boot.",
+                "Keyslot 3, which asks for a touch at boot."
+            ]
+        );
+        assert!(not_a_security_key(7).contains("Keyslot 7"));
+        assert!(not_a_security_key(7).contains("rift host keys"));
+    }
 
     #[test]
     fn an_auto_unlock_word_reads_as_a_state() {

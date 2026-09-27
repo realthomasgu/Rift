@@ -32,11 +32,11 @@ in
     # a new drive has no persist partition until its passphrase is chosen, which takes longer than
     # the 90 s systemd waits for a device. a device job cannot be ordered after a service
     crypttabExtraOpts = [ "x-systemd.device-timeout=infinity" ];
-    # a key sealed to the machine's tpm needs nothing here (ADR-0080). vault writes a systemd-tpm2
-    # token into the header with systemd-cryptenroll, and cryptsetup's own token plugin unseals it
-    # in the initrd: measured, persist opened in 0.6 s with nothing typed. with no tpm, no sealed
-    # key, or a tpm that cannot unseal the one there is, the passphrase is asked for as always.
-    # fido2 is P2.9 part 2 and goes in the header the same way
+    # neither a key sealed to the machine's tpm nor a security key needs anything here (ADR-0080,
+    # ADR-0081). vault writes a systemd-tpm2 or a systemd-fido2 token into the header with
+    # systemd-cryptenroll, and cryptsetup's own token plugin uses it in the initrd: measured,
+    # persist opened in 0.6 s with nothing typed. with no token in the header, or a token this
+    # machine cannot use, the passphrase is asked for as always
   };
 
   # vault-first-boot runs before persist is opened. on a drive without persist it asks for a

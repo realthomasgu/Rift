@@ -9,7 +9,9 @@
 //! root can reach. `Owner`, `SetOwnerName` and `SetOwnerPassword` read and change the owner's name
 //! and password, and answer the owner and root alone. `AutoUnlock` and `SetAutoUnlock` say whether
 //! this machine's tpm holds a key for persist and seal one to it or wipe it, and answer the owner
-//! and root alone too.
+//! and root alone too. `SecurityKeys` and `RemoveSecurityKey` say which security keys open persist
+//! and take one off, and answer the owner and root alone as well. Adding one is not here: it needs
+//! a terminal, so `vault enroll-key` does it as root.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,6 +23,7 @@ use zbus::message::Header;
 
 use crate::backup::Backups;
 use crate::boot::Esp;
+use crate::keys::{Keys, Refusal as KeyRefusal};
 use crate::owner::{self, Owner, Refusal};
 use crate::restore::{self, Account, Outcome, Problem};
 use crate::slots::Drive;
@@ -36,6 +39,7 @@ pub struct Vault {
     drive: Arc<Drive>,
     owner: Arc<Owner>,
     sealed: Arc<Sealed>,
+    keys: Arc<Keys>,
 }
 
 #[zbus::interface(name = "dev.rift.Vault")]
@@ -308,6 +312,47 @@ impl Vault {
         println!("vault: this drive opens by itself on machine {short}, set by uid {uid}");
         Ok(())
     }
+
+    /// Which security keys open the drive: the keyslot each one opens, whether it asks for its pin
+    /// at boot and whether it has to be touched. Adding one is not on the bus, because the key is
+    /// touched and its pin typed while the enrollment waits.
+    #[zbus(out_args("keys"))]
+    async fn security_keys(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<Vec<(u32, bool, bool)>> {
+        owner_or_root(&header, connection, &self.owner).await?;
+        let keys = Arc::clone(&self.keys);
+        blocking::unblock(move || keys.list())
+            .await
+            .map(|keys| {
+                keys.into_iter()
+                    .map(|key| (key.slot, key.pin, key.presence))
+                    .collect()
+            })
+            .map_err(fdo::Error::Failed)
+    }
+
+    /// Takes the security key in a keyslot off the drive. The passphrase slot is never one of
+    /// these, so the drive still opens with it.
+    async fn remove_security_key(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        slot: u32,
+    ) -> fdo::Result<()> {
+        let uid = owner_or_root(&header, connection, &self.owner).await?;
+        let keys = Arc::clone(&self.keys);
+        blocking::unblock(move || keys.remove(slot))
+            .await
+            .map_err(|refusal| match refusal {
+                KeyRefusal::NotAKey(_) => fdo::Error::InvalidArgs(refusal.why()),
+                other => fdo::Error::Failed(other.why()),
+            })?;
+        println!("vault: the security key in keyslot {slot} is off this drive, by uid {uid}");
+        Ok(())
+    }
 }
 
 /// The fingerprint of the machine this is running on, which Orbit is the one to say.
@@ -422,6 +467,7 @@ pub fn serve(
     esp: Esp,
     drive: Drive,
     sealed: Sealed,
+    keys: Keys,
 ) -> zbus::Result<()> {
     backups.clear();
     let component = Component::Vault;
@@ -433,6 +479,7 @@ pub fn serve(
         drive: Arc::new(drive),
         owner: Arc::new(Owner::system()),
         sealed: Arc::new(sealed),
+        keys: Arc::new(keys),
     };
     let _connection = zbus::blocking::connection::Builder::system()?
         .name(component.dbus_name())?
