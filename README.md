@@ -52,6 +52,7 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 
 - Personal data lives on a LUKS2 volume formatted with btrfs and zstd compression, divided into subvolumes by kind of data.
 - The volume is created on the first boot of a newly written drive and unlocked with a passphrase at each boot after that.
+- A machine the owner has declared their own can hold a key for the volume in its TPM, sealed to the firmware's record of the secure boot policy, so that machine starts the drive without the passphrase. One machine holds such a key at a time, `rift host auto-unlock` adds and removes it, and the passphrase continues to work on that machine and on every other.
 - Memory pressure is absorbed by compressed RAM (zram). No swap space exists on the drive or on the host.
 - An optional exFAT partition provides ordinary storage that Windows, macOS and other Linux systems can read without Rift.
 
@@ -220,7 +221,8 @@ Rift is in active development ahead of its first public release.
 | Settings and first-run setup | Working |
 | File manager | In progress |
 | Software center | Planned |
-| FIDO2 unlock, TPM2 unlock on owned machines, and a mode that boots without personal data | Planned |
+| TPM2 unlock on owned machines | Working |
+| FIDO2 unlock and a mode that boots without personal data | Planned |
 | Signed releases, Secure Boot support and delta updates | Planned |
 
 ## Reporting problems

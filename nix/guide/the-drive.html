@@ -33,6 +33,23 @@ off.</p>
 <p>The first boot of a new drive makes the encrypted volume and asks you to set its passphrase. Every
 boot after that asks for the passphrase and nothing else.</p>
 
+<h2>Starting without the passphrase on your own machine</h2>
+<p>On a machine that is yours, Rift can put a key for the volume in that machine's TPM, the small chip
+most computers made since about 2016 have for holding keys. The drive then starts on that machine with
+nothing typed.</p>
+<p>Tell Rift the machine is yours, then turn it on:</p>
+<pre>rift host set class owned
+rift host auto-unlock on</pre>
+<p>It asks for the drive's passphrase once, because that is what the key is made from. After that,
+<code>rift host auto-unlock</code> on its own says what the drive does at boot, and
+<code>rift host auto-unlock off</code> takes the key away again.</p>
+<p>Two things to know. One machine holds the key at a time: turning it on on a second machine takes it
+off the first. And the passphrase never stops working, on that machine or any other, so the drive is
+still yours anywhere.</p>
+<p>What this costs you: somebody who takes both the drive and that machine can start it. Without the
+machine, the drive is a box of random bytes as before. Use it on a computer that stays where you are,
+and leave it off for a drive you carry.</p>
+
 <h2>The computer you are borrowing</h2>
 <p>Rift uses the machine's processor, memory, graphics, screen and network. It does not touch the
 machine's own disks: they are never mounted by themselves, and nothing is written to them. The
