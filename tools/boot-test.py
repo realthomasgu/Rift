@@ -2051,6 +2051,9 @@ def main():
     if args.tpm:
         own = os.path.abspath(os.path.join(args.tpm, "own"))
         other = os.path.abspath(os.path.join(args.tpm, "other"))
+        # what systemd prints once persist is open, on a boot that asked for the passphrase and on
+        # one that did not. the shutdown before it says "Stopped", which this does not match
+        OPENED = r"Finished systemd-cryptsetup@persist\.service"
 
         def tpm_there():
             """Whether the kernel found a tpm on this machine."""
@@ -2095,6 +2098,23 @@ def main():
             status = int(child.match.group(1))
             return status, " ".join(without_console(ESCAPES.sub("", child.before).replace("\r", "")).split())
 
+        def came_up(what, passphrase_wanted):
+            """Wait for the boot that is starting to open persist, and check whether it had to ask
+            for the passphrase to do it. The anchor is the line systemd prints when persist is
+            open, whatever opened it, and never the shell prompt: fish repaints its prompt whenever
+            the journal writes to the console, so a prompt matches the moment a reboot is asked
+            for, a second before the machine has even gone down."""
+            asked = expect([OPENED, PASSPHRASE], f"persist to be opened {what}") == 1
+            if asked != passphrase_wanted:
+                want = "ask for the passphrase" if passphrase_wanted else "open without the passphrase"
+                fail(f"the boot {what} did not {want}")
+            if asked:
+                unlock()
+            else:
+                expect([PROMPT], f"the autologin shell {what}")
+            ok(f"the boot {what} "
+               + ("asked for the passphrase" if asked else "opened without the passphrase"))
+
         def boot_again(tpm_dir, machine, passphrase_wanted):
             """Boot the kept drive in a qemu of its own with this tpm state beside it, and check
             whether it asks for the passphrase. The command line is the first boot's with the drive
@@ -2123,13 +2143,7 @@ def main():
             child = pexpect.spawn(again[0], again[1:], encoding="utf-8", codec_errors="replace",
                                   dimensions=(40, 160))
             child.logfile_read = tee
-            asked = expect([PROMPT, PASSPHRASE], f"the boot on {machine}") == 1
-            if asked != passphrase_wanted:
-                want = "ask for the passphrase" if passphrase_wanted else "open without the passphrase"
-                fail(f"the boot on {machine} did not {want}")
-            if asked:
-                unlock()
-            ok(f"the boot on {machine} " + ("asked for the passphrase" if asked else "opened without the passphrase"))
+            came_up(f"on {machine}", passphrase_wanted)
 
         # the drive as it comes: nothing is sealed, and the machine is one it has never seen
         if not tpm_there():
@@ -2183,9 +2197,7 @@ def main():
         # the boot that is the whole point: the drive opens with nothing typed
         reboot_action("reset")
         child.send("sudo systemctl reboot\r")
-        if expect([PROMPT, PASSPHRASE], "the boot after a key was sealed") == 1:
-            fail("the boot after a key was sealed asked for the passphrase")
-        ok("the boot after a key was sealed opened without the passphrase")
+        came_up("after a key was sealed", passphrase_wanted=False)
         said = auto_unlock("what the drive says after it opened by itself")
         if "opens by itself on this machine" not in said:
             fail(f"after opening by itself the drive says {said!r}")
