@@ -7,7 +7,9 @@
 //! backup disk, and `Target` says which folder on which disk they go to. `BootStyle` and
 //! `SetBootStyle` read and write the word on the esp that says how the next boot looks, which only
 //! root can reach. `Owner`, `SetOwnerName` and `SetOwnerPassword` read and change the owner's name
-//! and password, and answer the owner and root alone.
+//! and password, and answer the owner and root alone. `AutoUnlock` and `SetAutoUnlock` say whether
+//! this machine's tpm holds a key for persist and seal one to it or wipe it, and answer the owner
+//! and root alone too.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,6 +25,7 @@ use crate::owner::{self, Owner, Refusal};
 use crate::restore::{self, Account, Outcome, Problem};
 use crate::slots::Drive;
 use crate::timeline::{self, Timeline};
+use crate::tpm::{Refusal as SealRefusal, Sealed};
 
 /// The object that answers on the bus.
 pub struct Vault {
@@ -32,6 +35,7 @@ pub struct Vault {
     esp: Arc<Esp>,
     drive: Arc<Drive>,
     owner: Arc<Owner>,
+    sealed: Arc<Sealed>,
 }
 
 #[zbus::interface(name = "dev.rift.Vault")]
@@ -243,6 +247,97 @@ impl Vault {
             .map(|slots| slots.answer())
             .map_err(fdo::Error::Failed)
     }
+
+    /// Whether this machine's tpm holds a key for persist: `on` here, `elsewhere` when the key was
+    /// sealed on another machine, `off` when no machine holds one. The second value is that other
+    /// machine's fingerprint, and the third says whether this machine has a tpm at all.
+    #[zbus(out_args("state", "machine", "has_tpm"))]
+    async fn auto_unlock(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<(String, String, bool)> {
+        owner_or_root(&header, connection, &self.owner).await?;
+        let fingerprint = this_machine().await?;
+        let sealed = Arc::clone(&self.sealed);
+        blocking::unblock(move || {
+            let state = sealed.state(&fingerprint)?;
+            Ok((
+                state.word().to_string(),
+                state.machine().to_string(),
+                crate::tpm::machine_has_a_tpm(),
+            ))
+        })
+        .await
+        .map_err(fdo::Error::Failed)
+    }
+
+    /// Seals a key for persist to this machine's tpm, or wipes the one that is sealed. Sealing one
+    /// takes the drive's passphrase, which is how the volume key is read, and only happens on a
+    /// machine the owner has said is theirs. The passphrase slot is never touched either way.
+    async fn set_auto_unlock(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        on: bool,
+        passphrase: String,
+    ) -> fdo::Result<()> {
+        let uid = owner_or_root(&header, connection, &self.owner).await?;
+        let sealed = Arc::clone(&self.sealed);
+        if !on {
+            blocking::unblock(move || sealed.turn_off())
+                .await
+                .map_err(fdo::Error::Failed)?;
+            println!("vault: this drive asks for its passphrase again, set by uid {uid}");
+            return Ok(());
+        }
+        let class = host_class().await?;
+        if class != "owned" {
+            return Err(sealing_refused(&SealRefusal::NotOwned(class)));
+        }
+        let fingerprint = this_machine().await?;
+        let short = fingerprint.get(..12).unwrap_or(&fingerprint).to_string();
+        blocking::unblock(move || sealed.turn_on(&passphrase, &fingerprint))
+            .await
+            .map_err(|refusal| {
+                if matches!(refusal, SealRefusal::Wrong(_)) {
+                    println!("vault: a wrong drive passphrase from uid {uid}");
+                }
+                sealing_refused(&refusal)
+            })?;
+        println!("vault: this drive opens by itself on machine {short}, set by uid {uid}");
+        Ok(())
+    }
+}
+
+/// The fingerprint of the machine this is running on, which Orbit is the one to say.
+async fn this_machine() -> fdo::Result<String> {
+    orbit_says(|host| host.fingerprint).await
+}
+
+/// This machine's class: `owned`, `trusted` or `borrowed`.
+async fn host_class() -> fdo::Result<String> {
+    orbit_says(|host| host.class).await
+}
+
+/// One thing Orbit remembers about this machine. Orbit owns the host profile, so Vault asks it
+/// rather than reading the file behind its back.
+async fn orbit_says(pick: fn(librift::orbit::Host) -> String) -> fdo::Result<String> {
+    blocking::unblock(move || librift::orbit::host().map(pick))
+        .await
+        .map_err(|why| {
+            fdo::Error::Failed(format!("Orbit could not say what this machine is: {why}"))
+        })
+}
+
+/// The error a sealing was refused with, of the kind that says why.
+fn sealing_refused(refusal: &SealRefusal) -> fdo::Error {
+    let why = refusal.why();
+    match refusal {
+        SealRefusal::NotOwned(_) | SealRefusal::Wrong(_) => fdo::Error::AccessDenied(why),
+        SealRefusal::NoTpm => fdo::Error::NotSupported(why),
+        SealRefusal::Failed(_) => fdo::Error::Failed(why),
+    }
 }
 
 /// The account that sent the message: its uid from the bus, its group from the password file.
@@ -326,6 +421,7 @@ pub fn serve(
     home: PathBuf,
     esp: Esp,
     drive: Drive,
+    sealed: Sealed,
 ) -> zbus::Result<()> {
     backups.clear();
     let component = Component::Vault;
@@ -336,6 +432,7 @@ pub fn serve(
         esp: Arc::new(esp),
         drive: Arc::new(drive),
         owner: Arc::new(Owner::system()),
+        sealed: Arc::new(sealed),
     };
     let _connection = zbus::blocking::connection::Builder::system()?
         .name(component.dbus_name())?

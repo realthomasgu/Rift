@@ -16,6 +16,7 @@ mod owner;
 mod restore;
 mod slots;
 mod timeline;
+mod tpm;
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ use exchange::Exchange;
 use restore::Source;
 use slots::Drive;
 use timeline::{Keep, Timeline};
+use tpm::Sealed;
 
 /// What is snapshotted, where the snapshots go, and where the snapshotted subvolume is mounted.
 /// The last two are in librift, since Files reads a folder in a snapshot itself.
@@ -47,6 +49,9 @@ const DESIGNATORS: &str = "/dev/disk/by-designator";
 const CLONE_RUN: &str = "/run/vault-clone";
 /// The systemd-sysupdate transfer files, which say where updates come from.
 const TRANSFERS: &str = "/etc/sysupdate.d";
+/// The partition persist is on, by the label the image gives it: what a key sealed to a machine's
+/// tpm is sealed for.
+const PERSIST: &str = "/dev/disk/by-partlabel/persist";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -82,6 +87,7 @@ struct Args {
     cloner: Cloner,
     esp: Esp,
     drive: Drive,
+    sealed: Sealed,
     home: PathBuf,
     replace: bool,
 }
@@ -94,6 +100,7 @@ fn main() -> ExitCode {
         cloner,
         esp,
         drive,
+        sealed,
         home,
         replace,
     } = match parse_args(std::env::args().skip(1)) {
@@ -107,7 +114,7 @@ fn main() -> ExitCode {
     };
 
     let result = match command {
-        Command::Serve => bus::serve(timeline, backups, home, esp, drive)
+        Command::Serve => bus::serve(timeline, backups, home, esp, drive, sealed)
             .map_err(|e| format!("vault: could not answer on the system bus: {e}")),
         Command::Take => took(&timeline),
         Command::Prune => pruned(&timeline),
@@ -401,6 +408,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
     if serial.is_some() {
         return Err("--serial goes with clone".into());
     }
+    // a key sealed to this machine's tpm, with its note beside the backup target and the
+    // passphrase handed over on the tmpfs
+    let sealed = Sealed::new(Path::new(PERSIST), &state, &run);
     // persist's top is where the snapshotted subvolume is
     let persist = subvolume
         .parent()
@@ -418,6 +428,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
         },
         esp: Esp::new(PathBuf::from(DESIGNATORS), PathBuf::from(RUN)),
         drive: running_drive(),
+        sealed,
         cloner: Cloner {
             persist,
             snapshots: snapshots.with_file_name("clone"),
