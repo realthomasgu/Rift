@@ -15,8 +15,8 @@ path = "src/main.rs"
 [dependencies]
 # host, ai and doctor ask the services on the system bus
 librift = { workspace = true, features = ["bus"] }
-# the free space on persist, without unsafe code
-rustix = { version = "1.1", default-features = false, features = ["fs", "std"] }
+# the free space on persist, and a passphrase typed without echo, without unsafe code
+rustix = { version = "1.1", default-features = false, features = ["fs", "std", "termios"] }
 
 [lints]
 workspace = true

@@ -1,19 +1,24 @@
 //! `rift host`: what Orbit remembers about this machine, one row per setting, or one value by
 //! itself. `rift host set` writes the settings a person decides into the profile, through Orbit,
-//! which is the only thing that writes that file.
+//! which is the only thing that writes that file. `rift host auto-unlock` reads and sets whether
+//! this machine's tpm opens the drive without its passphrase, which is Vault's to do.
 
 use std::process::ExitCode;
 
 use librift::orbit::{self, Host, Output};
+use librift::vault::{self, AutoUnlock};
 
 use crate::text;
 
 const USAGE: &str = "Usage: rift host [class | tier]\n       rift host set <class | tier | gpu> \
-<value>\n       rift host set scale <screen> <1 or 2>";
+<value>\n       rift host set scale <screen> <1 or 2>\n       rift host auto-unlock [on | off]";
 
 const HELP: &str = "Shows what Orbit remembers about this machine. class prints the host class \
 (owned, trusted or borrowed) by itself, and tier the AI tier. set writes one of them into this \
-machine's profile: the class, the AI tier, the graphics path, or the size a screen is drawn at.";
+machine's profile: the class, the AI tier, the graphics path, or the size a screen is drawn at. \
+auto-unlock says whether this machine's tpm opens the drive without its passphrase, and on or off \
+seals a key to it or wipes the one there is. Only a machine whose class is owned may hold one, and \
+the passphrase always opens the drive, here and anywhere else.";
 
 pub fn run(args: &[String]) -> ExitCode {
     let one = match args {
@@ -24,6 +29,7 @@ pub fn run(args: &[String]) -> ExitCode {
         }
         [arg] if field(arg).is_some() => field(arg),
         [arg, rest @ ..] if arg == "set" => return set(rest),
+        [arg, rest @ ..] if arg == "auto-unlock" => return auto_unlock(rest),
         [arg, rest @ ..] => return text::unknown("host", rest.first().unwrap_or(arg), USAGE),
     };
     match orbit::host() {
@@ -115,6 +121,139 @@ fn describe(output: &Output) -> String {
     }
 }
 
+/// `rift host auto-unlock [on | off]`. With no word it says what the drive does at boot. `on`
+/// asks for the drive's passphrase and has Vault seal a key for it to this machine's tpm; `off`
+/// wipes that key. The passphrase slot is never touched, so the drive always opens with it.
+fn auto_unlock(args: &[String]) -> ExitCode {
+    let wanted = match args {
+        [] => None,
+        [word] if word == "on" => Some(true),
+        [word] if word == "off" => Some(false),
+        [word, ..] => {
+            eprintln!("rift host: `{word}` is not on or off\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let read = match vault::auto_unlock() {
+        Ok(read) => read,
+        Err(why) => {
+            eprintln!("{why}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (state, has_tpm) = read;
+    let Some(on) = wanted else {
+        for line in says(&state, has_tpm) {
+            println!("{line}");
+        }
+        return ExitCode::SUCCESS;
+    };
+    if on && state.here() {
+        println!("This drive already opens by itself on this machine.");
+        return ExitCode::SUCCESS;
+    }
+    if !on && matches!(state, AutoUnlock::Off) {
+        println!("This drive already asks for its passphrase at every boot.");
+        return ExitCode::SUCCESS;
+    }
+    // vault refuses both of these itself, since it is the one that has to. asking here as well
+    // means a passphrase is not typed for an answer that is already known
+    if on && !has_tpm {
+        eprintln!("{}", vault::NO_TPM);
+        return ExitCode::FAILURE;
+    }
+    if on {
+        match orbit::host() {
+            Ok(host) if host.class != "owned" => {
+                eprintln!("{}", vault::not_owned(&host.class));
+                return ExitCode::FAILURE;
+            }
+            Ok(_) => {}
+            Err(why) => {
+                eprintln!("{why}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let passphrase = if on {
+        match text::hidden("Type this drive's passphrase: ") {
+            Some(typed) if !typed.is_empty() => typed,
+            Some(_) => {
+                eprintln!(
+                    "A key is sealed with the passphrase that already opens the drive, so it \
+                           cannot be empty."
+                );
+                return ExitCode::FAILURE;
+            }
+            None => {
+                eprintln!(
+                    "Sealing a key needs the drive's passphrase, and there is no terminal to \
+                           type it on."
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        String::new()
+    };
+    match vault::set_auto_unlock(on, &passphrase) {
+        Ok(()) => {
+            for line in did(on, &state) {
+                println!("{line}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// What `rift host auto-unlock` prints about the drive as it is.
+fn says(state: &AutoUnlock, has_tpm: bool) -> Vec<String> {
+    match state {
+        AutoUnlock::Here => vec!["This drive opens by itself on this machine.".to_string()],
+        AutoUnlock::Elsewhere(machine) => {
+            let which = text::short(machine);
+            let named = if which.is_empty() {
+                "another machine".to_string()
+            } else {
+                format!("machine {which}")
+            };
+            vec![format!(
+                "This drive opens by itself on {named}, and asks for its passphrase here."
+            )]
+        }
+        AutoUnlock::Off if has_tpm => vec![
+            "This drive asks for its passphrase at every boot.".to_string(),
+            "rift host auto-unlock on seals a key to this machine's tpm.".to_string(),
+        ],
+        AutoUnlock::Off => vec![
+            "This drive asks for its passphrase at every boot.".to_string(),
+            "This machine has no tpm, so there is nothing to seal a key to.".to_string(),
+        ],
+    }
+}
+
+/// What it prints once Vault has sealed a key or wiped one.
+fn did(on: bool, before: &AutoUnlock) -> Vec<String> {
+    if !on {
+        return vec!["This drive asks for its passphrase at every boot again.".to_string()];
+    }
+    let mut said = vec!["This drive now opens by itself on this machine.".to_string()];
+    if let AutoUnlock::Elsewhere(machine) = before {
+        let which = text::short(machine);
+        said.push(if which.is_empty() {
+            "The machine that held the key before no longer does.".to_string()
+        } else {
+            format!("Machine {which} held the key before and no longer does.")
+        });
+    }
+    said.push("Its passphrase still opens it, here and on any other machine.".to_string());
+    said
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +317,45 @@ mod tests {
         );
         let headless = rows(&host(Vec::new()));
         assert!(headless.contains(&("Display", "none".to_string())));
+    }
+
+    #[test]
+    fn what_the_drive_does_at_boot_reads_as_a_sentence() {
+        assert_eq!(
+            says(&AutoUnlock::Here, true),
+            ["This drive opens by itself on this machine."]
+        );
+        let other = says(&AutoUnlock::Elsewhere("5297c0f65d6a34ff".into()), true);
+        assert_eq!(
+            other,
+            [
+                "This drive opens by itself on machine 5297c0f65d6a, and asks for its passphrase here."
+            ]
+        );
+        let nameless = says(&AutoUnlock::Elsewhere(String::new()), true);
+        assert!(nameless[0].contains("another machine"));
+        let off = says(&AutoUnlock::Off, true);
+        assert_eq!(off[0], "This drive asks for its passphrase at every boot.");
+        assert!(off[1].contains("rift host auto-unlock on"));
+        assert!(says(&AutoUnlock::Off, false)[1].contains("no tpm"));
+    }
+
+    #[test]
+    fn sealing_a_key_says_which_machine_held_it_before() {
+        let fresh = did(true, &AutoUnlock::Off);
+        assert_eq!(fresh[0], "This drive now opens by itself on this machine.");
+        assert_eq!(fresh.len(), 2);
+        assert!(fresh[1].contains("passphrase still opens it"));
+        let moved = did(true, &AutoUnlock::Elsewhere("5297c0f65d6a34ff".into()));
+        assert_eq!(moved.len(), 3);
+        assert_eq!(
+            moved[1],
+            "Machine 5297c0f65d6a held the key before and no longer does."
+        );
+        assert_eq!(
+            did(false, &AutoUnlock::Here),
+            ["This drive asks for its passphrase at every boot again."]
+        );
     }
 
     #[test]

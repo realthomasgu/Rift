@@ -84,6 +84,32 @@ pub fn confirm(question: &str) -> Option<bool> {
     Some(agrees(&line))
 }
 
+/// Asks for something secret on the terminal and reads it back without echoing it. `None` when
+/// there is no terminal to ask on, so nothing is read from a pipe by mistake.
+pub fn hidden(prompt: &str) -> Option<String> {
+    use rustix::termios::{self, LocalModes, OptionalActions};
+
+    let stdin = io::stdin();
+    if !stdin.is_terminal() {
+        return None;
+    }
+    eprint!("{prompt}");
+    let _ = io::stderr().flush();
+    let before = termios::tcgetattr(&stdin).ok();
+    if let Some(mut quiet) = before.clone() {
+        quiet.local_modes.remove(LocalModes::ECHO);
+        let _ = termios::tcsetattr(&stdin, OptionalActions::Now, &quiet);
+    }
+    let mut line = String::new();
+    let read = stdin.lock().read_line(&mut line);
+    if let Some(before) = before {
+        let _ = termios::tcsetattr(&stdin, OptionalActions::Now, &before);
+    }
+    eprintln!();
+    read.ok()?;
+    Some(line.trim_end_matches(['\n', '\r']).to_string())
+}
+
 fn agrees(line: &str) -> bool {
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }

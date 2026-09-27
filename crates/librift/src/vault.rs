@@ -1,6 +1,6 @@
 //! Vault from a client's side: the snapshots Timeline keeps of home, the backups on the backup
-//! disk and where they go, making them, restoring a file from one, and the boot style on the
-//! drive's esp, which only root can write.
+//! disk and where they go, making them, restoring a file from one, the boot style on the drive's
+//! esp, which only root can write, and whether this machine's tpm opens the drive by itself.
 
 use std::path::{Path, PathBuf};
 #[cfg(feature = "bus")]
@@ -36,6 +36,11 @@ const BOOT_STYLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long reading the two slots may take. Vault mounts the esp and reads the drive's table.
 #[cfg(feature = "bus")]
 const SLOTS_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long sealing a key to the tpm may take. cryptenroll reads the volume key out of a slot,
+/// which is argon2id over the passphrase, and then talks to the tpm.
+#[cfg(feature = "bus")]
+const SEAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 const HOUR: i64 = 3600;
 const DAY: i64 = 24 * HOUR;
@@ -380,9 +385,102 @@ fn changed(error: &zbus::Error) -> Option<String> {
     }
 }
 
+/// What a drive's auto-unlock is on the machine that asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoUnlock {
+    /// No machine's tpm holds a key for this drive. It opens with its passphrase and nothing else.
+    Off,
+    /// This machine's tpm holds one, so this machine opens it without the passphrase.
+    Here,
+    /// A key is sealed to a tpm and the machine it was sealed on is not this one. Holds that
+    /// machine's fingerprint, which is empty when nothing wrote it down.
+    Elsewhere(String),
+}
+
+impl AutoUnlock {
+    /// Whether this machine opens the drive by itself.
+    #[must_use]
+    pub fn here(&self) -> bool {
+        matches!(self, AutoUnlock::Here)
+    }
+}
+
+/// Why a machine whose class is not `owned` may not hold a key for the drive. Vault refuses with
+/// it, and the command says it before asking for a passphrase that would be refused.
+#[must_use]
+pub fn not_owned(class: &str) -> String {
+    format!(
+        "This drive only opens by itself on a machine the owner has said is theirs. This one is \
+         {class}. Run rift host set class owned first."
+    )
+}
+
+/// Why a machine with no tpm cannot hold a key for the drive.
+pub const NO_TPM: &str = "This machine has no tpm, so there is nothing to seal a key to.";
+
+/// What the word Vault answers with means.
+#[must_use]
+pub fn auto_unlock_state(word: &str, machine: &str) -> Option<AutoUnlock> {
+    match word {
+        "off" => Some(AutoUnlock::Off),
+        "on" => Some(AutoUnlock::Here),
+        "elsewhere" => Some(AutoUnlock::Elsewhere(machine.to_string())),
+        _ => None,
+    }
+}
+
+/// Whether this machine's tpm holds a key for persist, and whether the machine has a tpm at all.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, when the caller is neither the owner nor root,
+/// or when the header could not be read.
+#[cfg(feature = "bus")]
+pub fn auto_unlock() -> Result<(AutoUnlock, bool), String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(bus::PROPERTY_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, vault)?;
+    let (word, machine, has_tpm): (String, String, bool) = proxy
+        .call("AutoUnlock", &())
+        .map_err(|e| bus::sentence(vault, e))?;
+    let state = auto_unlock_state(&word, &machine)
+        .ok_or_else(|| format!("Vault said \"{word}\", which this program does not understand."))?;
+    Ok((state, has_tpm))
+}
+
+/// Seals a key for persist to this machine's tpm, or wipes the one that is sealed. Sealing takes
+/// the drive's passphrase; wiping takes none.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, when this machine is not the owner's, when it
+/// has no tpm, or when the passphrase does not open the drive.
+#[cfg(feature = "bus")]
+pub fn set_auto_unlock(on: bool, passphrase: &str) -> Result<(), String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(SEAL_TIMEOUT)?;
+    bus::proxy(&connection, vault)?
+        .call("SetAutoUnlock", &(on, passphrase))
+        .map_err(|e| bus::sentence(vault, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_auto_unlock_word_reads_as_a_state() {
+        assert_eq!(auto_unlock_state("off", ""), Some(AutoUnlock::Off));
+        assert_eq!(auto_unlock_state("on", ""), Some(AutoUnlock::Here));
+        assert_eq!(
+            auto_unlock_state("elsewhere", "5297c0f65d6a"),
+            Some(AutoUnlock::Elsewhere("5297c0f65d6a".into()))
+        );
+        assert_eq!(auto_unlock_state("sealed", ""), None);
+        assert!(AutoUnlock::Here.here());
+        assert!(!AutoUnlock::Off.here());
+        assert!(!AutoUnlock::Elsewhere(String::new()).here());
+    }
 
     #[test]
     fn outcomes_are_read_by_name() {
