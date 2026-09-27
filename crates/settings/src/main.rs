@@ -30,6 +30,7 @@ mod region;
 mod search;
 mod sound;
 mod ui;
+mod unlocking;
 mod updates;
 mod watch;
 

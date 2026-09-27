@@ -37,7 +37,7 @@ use crate::widgets::{BOLD, FONT, TEXT_SIZE, scroll};
 use crate::{
     about, accessibility, ai, appearance, apps, backups, bluetooth, datetime, displays, dock,
     icons, keyboard, net, notifications, owner, pointer, power, printers, privacy, region, search,
-    sound, updates, watch,
+    sound, unlocking, updates, watch,
 };
 
 /// What the window calls itself: the name of its desktop entry, which the dock, the compositor and
@@ -148,6 +148,10 @@ pub struct Settings {
     pub owner: Option<Result<librift::owner::Owner, String>>,
     /// What is typed on the Owner page.
     pub signing: owner::Form,
+    /// What Vault says opens the drive besides its passphrase, once the Owner page has asked.
+    pub unlocking: Option<Result<unlocking::Picture, String>>,
+    /// What is typed in that part of the page.
+    pub unlocking_form: unlocking::Form,
     /// What the dock keeps and where it stands, once the Dock page has read it, and again every
     /// second while it is up.
     pub dock: Option<dock::Picture>,
@@ -268,6 +272,10 @@ pub enum Message {
     Owner(Result<librift::owner::Owner, String>),
     /// A field or a button on the Owner page, or how a change there went.
     Owning(owner::Asked),
+    /// What Vault says opens the drive now.
+    Unlocking(Result<unlocking::Picture, String>),
+    /// A field or a button in the Unlocking part of that page, or how a change there went.
+    Unlock(unlocking::Asked),
     /// What localed says about the keyboard now.
     Layouts(Result<Region, String>),
     /// A layout was added, taken off or put first, or the shortcuts were asked for.
@@ -434,6 +442,7 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
     }
     if state.page == Page::Owner {
         work.push(owner::read());
+        work.push(unlocking::read());
     }
     if start.screenshot.is_some() {
         work.push(shoot());
@@ -502,6 +511,8 @@ impl Settings {
             security: None,
             owner: None,
             signing: owner::Form::default(),
+            unlocking: None,
+            unlocking_form: unlocking::Form::default(),
             dock: None,
             notices: None,
             joining: None,
@@ -579,6 +590,7 @@ impl Settings {
         .chain(apps::state(self))
         .chain(privacy::state(self))
         .chain(owner::state(self))
+        .chain(unlocking::state(self))
         // what went wrong last, which the page shows in red under everything else
         .chain(self.problem.as_ref().map(|why| format!("problem {why}")))
         .collect::<Vec<_>>()
@@ -695,6 +707,7 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Apps(asked) => return apps::asked(state, asked),
         Message::Private(asked) => return privacy::asked(state, asked),
         Message::Owning(asked) => return owner::asked(state, asked),
+        Message::Unlock(asked) => return unlocking::asked(state, asked),
         Message::Pointer(changed) => pointer::update(state, changed),
         Message::Wrote => state.wrote(),
         Message::Greeting(_) | Message::Restore(_) => switched(state, &message),
@@ -764,6 +777,7 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Privacy(picture) => state.privacy = Some(picture),
         Message::Security(answer) => state.security = Some(answer),
         Message::Owner(answer) => state.owner = Some(answer),
+        Message::Unlocking(answer) => state.unlocking = Some(answer),
         Message::Layouts(answer) => state.keyboard = Some(answer),
         Message::Devices(answer) => state.devices = Some(answer),
         Message::Backups(answer) => state.disk = Some(answer),
@@ -879,7 +893,7 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
         }
         // the owner's name and password are Vault's to answer, and nothing changes them while the
         // page is up but the page itself, which asks again after each change
-        Page::Owner => owner::read(),
+        Page::Owner => Task::batch([owner::read(), unlocking::read()]),
         _ => Task::none(),
     }
 }
@@ -971,6 +985,9 @@ fn set(state: &mut Settings, name: &str, value: &str) -> Task<Message> {
             .map_or_else(Task::none, |asked| Task::done(Message::Private(asked))),
         // the owner's name, and the current password and a new one, each typed and pressed
         name if owner::NAMES.contains(&name) => owner::named(name, value),
+        // the drive's passphrase for a key sealed to this machine's tpm, and a security key by the
+        // keyslot the page prints
+        "auto-unlock" | "remove-key" => unlocking::named(name, value),
         // the mouse and the touchpad, by the names their file has, for a device this machine has
         name if librift::pointer::NAMES.contains(&name) => pointer::named(state, name, value)
             .map_or_else(Task::none, |chosen| {

@@ -1,6 +1,6 @@
 //! The Owner page: the name the lock screen greets the owner by, the password it asks for, how the
-//! owner gets to the desktop, whether the apps that were open come back at the next login, and a
-//! sentence each for the drive's passphrase and security keys.
+//! owner gets to the desktop, whether the apps that were open come back at the next login, and what
+//! opens the drive besides its passphrase, which `unlocking` draws.
 //!
 //! Vault keeps the name and the password on persist and answers the owner and root alone, so the
 //! page asks it as it comes up and after each change, on a thread of its own. Nothing else changes
@@ -266,8 +266,7 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
             ),
         ]
         .spacing(8),
-        part(look, "Drive passphrase", PASSPHRASE),
-        part(look, "Security keys", KEYS),
+        crate::unlocking::view(state, look),
     ]
     .spacing(GAP)
     .width(Fill);
@@ -275,13 +274,6 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
         page = page.push(text(why).size(TEXT_SIZE).color(look.error));
     }
     page.into()
-}
-
-/// A heading and one sentence, for something there is nothing to set for.
-fn part<'a>(look: Colors, title: &'a str, said: &'a str) -> Element<'a, Message> {
-    column![heading(look, title), note(look, said)]
-        .spacing(8)
-        .into()
 }
 
 /// The name with its field and Save, the account's own name, and that it is an administrator.
@@ -442,12 +434,6 @@ const AUTOMATIC: &str = "The drive's passphrase is asked for when the machine st
 const RESTORE: &str = "At the first login after a boot, the apps that were open are opened again, \
                        each on the workspace it was on and in the column it stood in. An app this \
                        machine does not have is passed over.";
-/// What changes the drive's passphrase.
-const PASSPHRASE: &str = "Changing the drive's passphrase is not in Settings yet. sudo cryptsetup \
-                          luksChangeKey /dev/disk/by-partlabel/persist changes it in a terminal.";
-/// What security keys are for.
-const KEYS: &str = "Unlocking the drive with a security key in place of the passphrase is not in \
-                    Settings yet.";
 
 #[cfg(test)]
 mod tests {
@@ -558,8 +544,6 @@ mod tests {
             PASSWORD,
             AUTOMATIC,
             RESTORE,
-            PASSPHRASE,
-            KEYS,
         ] {
             assert!(sentence.ends_with('.'), "{sentence}");
             assert!(sentence.is_ascii(), "{sentence}");
