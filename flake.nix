@@ -276,11 +276,12 @@
               name = "rift-vm";
               runtimeInputs = [
                 pkgs.qemu_kvm
+                pkgs.swtpm
                 riftFlash
               ];
               text = ''
                 usage() {
-                  echo "usage: rift-vm --image file [--persist passfile | --first-boot] [--models dir] [--exchange size] [qemu options]" >&2
+                  echo "usage: rift-vm --image file [--persist passfile | --first-boot] [--models dir] [--exchange size] [--drive file] [--tpm dir] [qemu options]" >&2
                   echo "  --image       the drive to boot. with --persist or --first-boot, the image (.raw or .raw.zst) to write onto one" >&2
                   echo "  --persist     write the image onto a drive in a file with rift-flash (sudo), with the" >&2
                   echo "                passphrase for persist in this file" >&2
@@ -288,6 +289,10 @@
                   echo "                which the drive makes when it first starts, with a passphrase typed there" >&2
                   echo "  --models      copy the files in this directory into the models subvolume (with --persist)" >&2
                   echo "  --exchange    give the drive an exchange partition of this size, like 1G (with --persist or --first-boot)" >&2
+                  echo "  --drive       write the drive into this file and keep it, so a later boot can have it again" >&2
+                  echo "                (with --persist or --first-boot; without it the drive goes when qemu ends)" >&2
+                  echo "  --tpm         give the machine a software tpm with its state in this directory, made when it is" >&2
+                  echo "                missing and kept, so a key sealed to it still opens the drive at the next boot" >&2
                   echo "  the rest goes to qemu after the defaults, so later -m, -smp, -cpu win." >&2
                   echo "  -serial and -display are only set when you pass none" >&2
                 }
@@ -296,6 +301,8 @@
                 firstboot=""
                 models=""
                 exchange=""
+                keep=""
+                tpm=""
                 while [ $# -gt 0 ]; do
                   case $1 in
                     --image) image=''${2:?--image needs a file}; shift 2 ;;
@@ -303,6 +310,8 @@
                     --first-boot) firstboot=1; shift ;;
                     --models) models=''${2:?--models needs a directory}; shift 2 ;;
                     --exchange) exchange=''${2:?--exchange needs a size}; shift 2 ;;
+                    --drive) keep=''${2:?--drive needs a file}; shift 2 ;;
+                    --tpm) tpm=''${2:?--tpm needs a directory}; shift 2 ;;
                     -h|--help) usage; exit 0 ;;
                     --) shift; break ;;
                     *) break ;;
@@ -322,6 +331,10 @@
                   echo "rift-vm: --exchange goes with --persist or --first-boot" >&2
                   exit 1
                 fi
+                if [ -n "$keep" ] && [ -z "$persist$firstboot" ]; then
+                  echo "rift-vm: --drive goes with --persist or --first-boot" >&2
+                  exit 1
+                fi
                 if [ -n "$models" ] && [ ! -d "$models" ]; then
                   echo "rift-vm: no such directory: $models" >&2
                   exit 1
@@ -329,11 +342,15 @@
 
                 work=$(mktemp -d -t rift-vm.XXXXXX)
                 qemu=""
+                swtpm=""
                 # qemu runs as a child so the drive goes away when it ends or when we are killed
                 cleanup() {
                   if [ -n "$qemu" ]; then
                     kill "$qemu" 2>/dev/null || true
                     wait "$qemu" || true
+                  fi
+                  if [ -n "$swtpm" ]; then
+                    kill "$swtpm" 2>/dev/null || true
                   fi
                   rm -rf "$work"
                 }
@@ -341,23 +358,25 @@
                 trap 'exit 1' HUP INT TERM
                 if [ -n "$persist$firstboot" ]; then
                   # a sparse file the size of a small stick. rift-flash reads the image where it
-                  # is, so one in the store needs no copy
+                  # is, so one in the store needs no copy. with --drive the file is the caller's and
+                  # stays behind, so the next boot can be given the same drive
                   flash=(write)
                   if [ -n "$firstboot" ]; then flash+=(--first-boot); fi
                   if [ -n "$models" ]; then flash+=(--models "$models"); fi
                   if [ -n "$exchange" ]; then flash+=(--exchange "$exchange"); fi
-                  truncate -s 24G "$work/drive.img"
-                  echo "rift-vm: writing $image onto a drive in $work with rift-flash, sudo may ask for your password" >&2
+                  drive=''${keep:-$work/drive.img}
+                  truncate -s 24G "$drive"
+                  echo "rift-vm: writing $image onto a drive in $drive with rift-flash, sudo may ask for your password" >&2
                   if [ -n "$firstboot" ]; then
                     # no passphrase goes in, the drive asks for one when it first starts
-                    sudo "$(command -v rift-flash)" "''${flash[@]}" "$image" "$work/drive.img"
+                    sudo "$(command -v rift-flash)" "''${flash[@]}" "$image" "$drive"
                   else
                     # sudo sets a path of its own. the passfile is read as the person running this, not
                     # as root, which is what the redirect is for
                     # shellcheck disable=SC2024
-                    sudo "$(command -v rift-flash)" "''${flash[@]}" "$image" "$work/drive.img" < "$persist"
+                    sudo "$(command -v rift-flash)" "''${flash[@]}" "$image" "$drive" < "$persist"
                   fi
-                  image=$work/drive.img
+                  image=$drive
                 else
                   copy=0
                   case $image in /nix/store/*) copy=1 ;; esac
@@ -369,10 +388,39 @@
                     image=$work/drive.img
                   fi
                 fi
-                cp ${pkgs.OVMF.fd}/FV/OVMF_VARS.fd "$work/vars.fd"
+                # the firmware with a tpm in it is a build of its own, and only the machines that have
+                # one get it: every other boot keeps the firmware it has always had
+                firmware=${pkgs.OVMF.fd}
+                if [ -n "$tpm" ]; then firmware=${pkgs.OVMFFull.fd}; fi
+                cp "$firmware/FV/OVMF_VARS.fd" "$work/vars.fd"
                 chmod u+w "$work/vars.fd"
 
                 args=(-machine q35 -smp 4 -m 4096)
+                if [ -n "$tpm" ]; then
+                  # swtpm keeps the tpm in a directory of its own, so the seed the sealed key hangs
+                  # off lives through a reboot and through qemu ending. qemu talks to its control
+                  # socket and gets the data channel over it as a file descriptor
+                  mkdir -p "$tpm"
+                  echo "rift-vm: a software tpm with its state in $tpm" >&2
+                  swtpm socket --tpm2 --tpmstate dir="$tpm" \
+                    --ctrl type=unixio,path="$work/swtpm.sock" \
+                    --log file="$tpm/swtpm.log",level=1 &
+                  swtpm=$!
+                  waited=0
+                  while [ ! -S "$work/swtpm.sock" ]; do
+                    if [ $waited -ge 100 ]; then
+                      echo "rift-vm: the software tpm did not come up, see $tpm/swtpm.log" >&2
+                      exit 1
+                    fi
+                    sleep 0.1
+                    waited=$((waited + 1))
+                  done
+                  args+=(
+                    -chardev "socket,id=chrtpm,path=$work/swtpm.sock"
+                    -tpmdev "emulator,id=tpm0,chardev=chrtpm"
+                    -device "tpm-tis,tpmdev=tpm0"
+                  )
+                fi
                 if [ -w /dev/kvm ]; then
                   args+=(-accel kvm -cpu host)
                 else
@@ -392,7 +440,7 @@
 
                 echo "rift-vm: booting $image as an nvme drive" >&2
                 qemu-system-x86_64 "''${args[@]}" \
-                  -drive if=pflash,format=raw,readonly=on,file=${pkgs.OVMF.fd}/FV/OVMF_CODE.fd \
+                  -drive if=pflash,format=raw,readonly=on,file="$firmware/FV/OVMF_CODE.fd" \
                   -drive if=pflash,format=raw,file="$work/vars.fd" \
                   -drive if=none,id=disk0,format=raw,file="$image" \
                   -device nvme,drive=disk0,serial=rift \
