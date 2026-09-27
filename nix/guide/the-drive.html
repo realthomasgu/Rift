@@ -50,6 +50,23 @@ still yours anywhere.</p>
 machine, the drive is a box of random bytes as before. Use it on a computer that stays where you are,
 and leave it off for a drive you carry.</p>
 
+<h2>A security key</h2>
+<p>A FIDO2 security key can unlock the volume in place of the passphrase. Unlike the TPM, the key
+belongs to the drive and not to a machine, so it works wherever you plug the drive in, and you can
+enroll as many keys as you own. Two is the usual number: one you carry and one you keep somewhere
+safe.</p>
+<p>Plug the key in and run:</p>
+<pre>sudo rift host enroll-key</pre>
+<p>It asks for the drive's passphrase, because that is what the key is added beside, then asks for
+the key's own PIN and waits for you to touch it. At every boot after that the drive asks for the
+key's PIN and a touch instead of the passphrase. If the key has no PIN set, a touch is all it
+asks.</p>
+<p><code>rift host keys</code> lists the keys that open the drive, each by the keyslot it uses, and
+<code>rift host remove-key</code> takes one off by that number. Both are also on the Owner page in
+Settings, which is where you can see what opens the drive without typing anything.</p>
+<p>The passphrase never stops working, with a key enrolled or without one, so losing a key does not
+lose the drive.</p>
+
 <h2>The computer you are borrowing</h2>
 <p>Rift uses the machine's processor, memory, graphics, screen and network. It does not touch the
 machine's own disks: they are never mounted by themselves, and nothing is written to them. The

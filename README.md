@@ -53,6 +53,7 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 - Personal data lives on a LUKS2 volume formatted with btrfs and zstd compression, divided into subvolumes by kind of data.
 - The volume is created on the first boot of a newly written drive and unlocked with a passphrase at each boot after that.
 - A machine the owner has declared their own can hold a key for the volume in its TPM, sealed to the firmware's record of the secure boot policy, so that machine starts the drive without the passphrase. One machine holds such a key at a time, `rift host auto-unlock` adds and removes it, and the passphrase continues to work on that machine and on every other.
+- A FIDO2 security key can unlock the volume in place of the passphrase, asking for the key's own PIN and a touch. A key belongs to the drive rather than to a machine, so it works on every machine, and any number of keys can be enrolled. `rift host keys` lists them, `sudo rift host enroll-key` adds the one that is plugged in and `rift host remove-key` takes one off. The passphrase continues to work with a key enrolled or without one.
 - Memory pressure is absorbed by compressed RAM (zram). No swap space exists on the drive or on the host.
 - An optional exFAT partition provides ordinary storage that Windows, macOS and other Linux systems can read without Rift.
 
@@ -222,7 +223,8 @@ Rift is in active development ahead of its first public release.
 | File manager | In progress |
 | Software center | Planned |
 | TPM2 unlock on owned machines | Working |
-| FIDO2 unlock and a mode that boots without personal data | Planned |
+| FIDO2 security key unlock | Working |
+| A mode that boots without personal data | Planned |
 | Signed releases, Secure Boot support and delta updates | Planned |
 
 ## Reporting problems
