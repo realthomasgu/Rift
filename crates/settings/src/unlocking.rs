@@ -11,14 +11,14 @@
 use std::thread;
 
 use iced::futures::channel::oneshot;
-use iced::widget::{column, row, text};
+use iced::widget::{column, row};
 use iced::{Center, Element, Fill, Task};
 use librift::vault::{self, AutoUnlock, SecurityKey};
 
 use crate::ai::said;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
-use crate::widgets::{TEXT_SIZE, action, fact, field, focus, group, heading, note, setting};
+use crate::widgets::{action, fact, field, focus, group, heading, note, setting};
 
 /// The field the drive's passphrase is typed into.
 const PASSPHRASE_FIELD: &str = "unlocking-passphrase";
@@ -31,7 +31,32 @@ pub struct Picture {
     /// Whether this machine has a tpm at all.
     pub has_tpm: bool,
     /// The security keys that open the drive, lowest keyslot first.
-    pub keys: Vec<SecurityKey>,
+    pub keys: Vec<Key>,
+}
+
+/// One security key as the page draws it. The keyslot is its name, because systemd's token holds
+/// none, and the sentences are kept here because a row borrows its label for as long as it is
+/// drawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Key {
+    /// The keyslot it opens, which is what removes it.
+    pub slot: u32,
+    /// Its name on the page, `Keyslot 2`.
+    pub name: String,
+    /// What it asks for at boot, under the name.
+    pub asks: String,
+}
+
+impl Key {
+    /// One of Vault's keys as a row.
+    #[must_use]
+    pub fn new(key: SecurityKey) -> Key {
+        Key {
+            slot: key.slot,
+            name: format!("Keyslot {}", key.slot),
+            asks: format!("It asks for {} at boot.", key.asks()),
+        }
+    }
 }
 
 /// What is typed in this part of the page, and whether a change is on its way to Vault.
@@ -79,7 +104,7 @@ fn asked_of_vault() -> Result<Picture, String> {
     Ok(Picture {
         auto,
         has_tpm,
-        keys: vault::security_keys()?,
+        keys: vault::security_keys()?.into_iter().map(Key::new).collect(),
     })
 }
 
@@ -246,11 +271,13 @@ fn rows<'a>(state: &'a Settings, look: Colors, drive: &'a Picture) -> Vec<Elemen
                 (!busy).then_some(Message::Unlock(Asked::TurnOff)),
             ),
             (_, false) => said(look, "No tpm"),
-            (_, true) if state.unlocking_form.passphrase.is_some() => said(look, "Off"),
+            // while the field below is open the button is there and dimmed, so the row does not
+            // change shape under the hand that pressed it
             _ => action(
                 look,
                 "Turn on",
-                (!busy).then_some(Message::Unlock(Asked::Open(true))),
+                (!busy && state.unlocking_form.passphrase.is_none())
+                    .then_some(Message::Unlock(Asked::Open(true))),
             ),
         },
     )];
@@ -293,20 +320,13 @@ fn rows<'a>(state: &'a Settings, look: Colors, drive: &'a Picture) -> Vec<Elemen
     for key in &drive.keys {
         rows.push(setting(
             look,
-            KEYSLOT,
-            None,
-            row![
-                text(format!("Keyslot {}, asks for {}", key.slot, key.asks()))
-                    .size(TEXT_SIZE)
-                    .color(look.dim),
-                action(
-                    look,
-                    "Remove",
-                    (!busy).then_some(Message::Unlock(Asked::Remove(key.slot)))
-                ),
-            ]
-            .spacing(8)
-            .align_y(Center),
+            &key.name,
+            Some(&key.asks),
+            action(
+                look,
+                "Remove",
+                (!busy).then_some(Message::Unlock(Asked::Remove(key.slot))),
+            ),
         ));
     }
     rows
@@ -316,7 +336,8 @@ fn rows<'a>(state: &'a Settings, look: Colors, drive: &'a Picture) -> Vec<Elemen
 fn automatic(drive: &Picture) -> &'static str {
     match (&drive.auto, drive.has_tpm) {
         (AutoUnlock::Here, _) => HERE,
-        (AutoUnlock::Elsewhere(_), _) => ELSEWHERE,
+        (AutoUnlock::Elsewhere(_), true) => ELSEWHERE,
+        (AutoUnlock::Elsewhere(_), false) => ELSEWHERE_NO_TPM,
         (AutoUnlock::Off, true) => OFF,
         (AutoUnlock::Off, false) => NO_TPM,
     }
@@ -341,6 +362,9 @@ const HERE: &str = "This machine's tpm holds a key for the drive, so the drive s
 /// And while the key is on another machine.
 const ELSEWHERE: &str = "Another machine's tpm holds a key for the drive. Turning it on here takes \
                          it off that machine.";
+/// And when that machine is not this one and this one has no tpm to hold it instead.
+const ELSEWHERE_NO_TPM: &str = "Another machine's tpm holds a key for the drive. This machine has \
+                                no tpm, so the drive asks for its passphrase here.";
 /// And while no machine holds one.
 const OFF: &str = "A machine you have said is yours can hold a key for the drive in its tpm and \
                    start it with nothing typed.";
@@ -353,8 +377,6 @@ const SEALING: &str = "Sealing a key to this machine's tpm.";
 /// Under the security keys row.
 const KEYS: &str = "A security key opens the drive on every machine, and any number of them can. \
                     The drive's passphrase opens it as well, with a key or without one.";
-/// The label of one security key's row.
-const KEYSLOT: &str = "A security key";
 /// What is said when the field is empty.
 const EMPTY: &str = "A key is sealed with the passphrase that already opens the drive, so it \
                      cannot be empty.";
@@ -369,15 +391,15 @@ const PASSPHRASE: &str = "The drive's passphrase always opens it, here and on ev
 mod tests {
     use super::*;
 
-    fn key(slot: u32) -> SecurityKey {
-        SecurityKey {
+    fn key(slot: u32) -> Key {
+        Key::new(SecurityKey {
             slot,
             pin: true,
             presence: true,
-        }
+        })
     }
 
-    fn settings(auto: AutoUnlock, has_tpm: bool, keys: Vec<SecurityKey>) -> Settings {
+    fn settings(auto: AutoUnlock, has_tpm: bool, keys: Vec<Key>) -> Settings {
         let mut state = Settings::bare();
         state.unlocking = Some(Ok(Picture {
             auto,
@@ -486,11 +508,20 @@ mod tests {
     #[test]
     fn the_sentences_are_sentences() {
         for sentence in [
-            STOPPED, HERE, ELSEWHERE, OFF, NO_TPM, TYPE_IT, SEALING, KEYS, EMPTY, PASSPHRASE,
+            STOPPED,
+            HERE,
+            ELSEWHERE,
+            ELSEWHERE_NO_TPM,
+            OFF,
+            NO_TPM,
+            TYPE_IT,
+            SEALING,
+            KEYS,
+            EMPTY,
+            PASSPHRASE,
         ] {
             assert!(sentence.ends_with('.'), "{sentence}");
             assert!(sentence.is_ascii(), "{sentence}");
         }
-        assert!(KEYSLOT.is_ascii());
     }
 }
