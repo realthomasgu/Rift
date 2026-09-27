@@ -1,9 +1,11 @@
 //! `rift host`: what Orbit remembers about this machine, one row per setting, or one value by
 //! itself. `rift host set` writes the settings a person decides into the profile, through Orbit,
 //! which is the only thing that writes that file. `rift host auto-unlock` reads and sets whether
-//! this machine's tpm opens the drive without its passphrase, which is Vault's to do.
+//! this machine's tpm opens the drive without its passphrase, which is Vault's to do, and `rift
+//! host keys`, `enroll-key` and `remove-key` are the security keys that open it.
 
-use std::process::ExitCode;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, ExitCode};
 
 use librift::orbit::{self, Host, Output};
 use librift::vault::{self, AutoUnlock};
@@ -11,14 +13,18 @@ use librift::vault::{self, AutoUnlock};
 use crate::text;
 
 const USAGE: &str = "Usage: rift host [class | tier]\n       rift host set <class | tier | gpu> \
-<value>\n       rift host set scale <screen> <1 or 2>\n       rift host auto-unlock [on | off]";
+<value>\n       rift host set scale <screen> <1 or 2>\n       rift host auto-unlock [on | off]\n\
+       rift host keys\n       sudo rift host enroll-key\n       rift host remove-key <keyslot>";
 
 const HELP: &str = "Shows what Orbit remembers about this machine. class prints the host class \
 (owned, trusted or borrowed) by itself, and tier the AI tier. set writes one of them into this \
 machine's profile: the class, the AI tier, the graphics path, or the size a screen is drawn at. \
 auto-unlock says whether this machine's tpm opens the drive without its passphrase, and on or off \
 seals a key to it or wipes the one there is. Only a machine whose class is owned may hold one, and \
-the passphrase always opens the drive, here and anywhere else.";
+the passphrase always opens the drive, here and anywhere else. keys says which security keys open \
+the drive, enroll-key adds the one that is plugged in, and remove-key takes one off by the keyslot \
+keys prints. A security key belongs to the drive and not to a machine, so any number of them may \
+be enrolled and they work on every machine.";
 
 pub fn run(args: &[String]) -> ExitCode {
     let one = match args {
@@ -30,6 +36,9 @@ pub fn run(args: &[String]) -> ExitCode {
         [arg] if field(arg).is_some() => field(arg),
         [arg, rest @ ..] if arg == "set" => return set(rest),
         [arg, rest @ ..] if arg == "auto-unlock" => return auto_unlock(rest),
+        [arg, rest @ ..] if arg == "keys" => return keys(rest),
+        [arg, rest @ ..] if arg == "enroll-key" => return enroll_key(rest),
+        [arg, rest @ ..] if arg == "remove-key" => return remove_key(rest),
         [arg, rest @ ..] => return text::unknown("host", rest.first().unwrap_or(arg), USAGE),
     };
     match orbit::host() {
@@ -201,6 +210,76 @@ fn auto_unlock(args: &[String]) -> ExitCode {
             for line in did(on, &state) {
                 println!("{line}");
             }
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `rift host keys`: the security keys that open the drive, one line each.
+fn keys(args: &[String]) -> ExitCode {
+    if !args.is_empty() {
+        eprintln!(
+            "rift host keys: `{}` is not one of its words\n{USAGE}",
+            args[0]
+        );
+        return ExitCode::from(2);
+    }
+    match vault::security_keys() {
+        Ok(keys) => {
+            for line in vault::keys_read_as(&keys) {
+                println!("{line}");
+            }
+            if keys.is_empty() {
+                println!("sudo rift host enroll-key adds the one that is plugged in.");
+            } else {
+                println!("Its passphrase opens it as well, with a key or without one.");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("{why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `sudo rift host enroll-key`: the security key that is plugged in, added to the drive. Vault does
+/// it as root in this terminal, because the key is touched and its pin typed while it waits, so
+/// this runs `vault enroll-key` in its place.
+fn enroll_key(args: &[String]) -> ExitCode {
+    if !args.is_empty() {
+        eprintln!(
+            "rift host enroll-key: `{}` is not one of its words\n{USAGE}",
+            args[0]
+        );
+        return ExitCode::from(2);
+    }
+    let error = Command::new("vault").arg("enroll-key").exec();
+    eprintln!("Could not run vault: {error}");
+    ExitCode::FAILURE
+}
+
+/// `rift host remove-key <keyslot>`: one security key taken off the drive.
+fn remove_key(args: &[String]) -> ExitCode {
+    let [slot] = args else {
+        eprintln!("rift host remove-key: one keyslot, as rift host keys prints it\n{USAGE}");
+        return ExitCode::from(2);
+    };
+    let Ok(slot) = slot.trim().parse::<u32>() else {
+        eprintln!(
+            "rift host remove-key: `{}` is not a keyslot. rift host keys prints them.",
+            slot.trim()
+        );
+        return ExitCode::from(2);
+    };
+    match vault::remove_security_key(slot) {
+        Ok(()) => {
+            println!("The security key in keyslot {slot} no longer opens this drive.");
+            println!("Its passphrase still does.");
             ExitCode::SUCCESS
         }
         Err(why) => {
