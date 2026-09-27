@@ -79,6 +79,8 @@ in
       interval = "monthly";
     };
     services.dbus.packages = [ policy ];
+    # cryptsetup's luks2 lock directory, which vault writes the header of persist under
+    systemd.tmpfiles.rules = [ "d /run/cryptsetup 0700 root root -" ];
 
     systemd.services.vault = {
       description = "Vault";
@@ -96,6 +98,9 @@ in
         pkgs.btrfs-progs
         pkgs.rustic
         pkgs.util-linux
+        # reading the header of persist, to see whether a key is sealed to this machine's tpm.
+        # systemd-cryptenroll, which seals and wipes it, comes with systemd on the default path
+        pkgs.cryptsetup
       ];
       serviceConfig = {
         Type = "dbus";
@@ -109,6 +114,10 @@ in
         ReadWritePaths = [
           "/persist"
           "/home"
+          # cryptsetup takes its luks2 lock here, and strict would otherwise hand this service a
+          # read-only /run. without it nothing can write the header of persist. the rule below
+          # makes the directory, since cryptsetup's own tmpfiles rule is not ours to rely on
+          "-/run/cryptsetup"
         ];
         # the backup target and its password, and the owner's own name and the hash of their
         # password. only root reads them
