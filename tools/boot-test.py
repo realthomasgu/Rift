@@ -6617,6 +6617,14 @@ def main():
             point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
             look(f"{SETTINGS_APP} on the Owner page", f"{stem}-settings-owner{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            # the Unlocking rows are below the fold on a screen this size, so the page is wheeled to
+            # the bottom for a picture of its own before the pointer goes back out of the way
+            for _ in range(12):
+                click(args.qmp, size, (round(width * 2 / 3), round(height / 2)), button="wheel-down")
+            look(f"{SETTINGS_APP} on the Owner page, scrolled to the unlocking rows",
+                 f"{stem}-settings-unlocking{extension}", 30, apps=[SETTINGS_APP], journals=("horizon",),
+                 settle=3)
+            point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
             # pressing either of them goes to Vault, which refuses both on this machine and says why
             run("rift-settings --set auto-unlock {}".format(passphrase.strip()),
                 "sealing a key from the page on a machine the owner has said nothing about")
