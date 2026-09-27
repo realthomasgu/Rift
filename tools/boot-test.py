@@ -612,7 +612,8 @@ SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text
                  "primary-button", "mouse-speed", "mouse-acceleration", "mouse-natural-scrolling",
                  "touchpad-speed", "tap-to-click", "touchpad-natural-scrolling", "disable-while-typing",
                  "edge-scrolling", "pinned", "dock-position", "dock-extend", "dock-icons", "dock-hide",
-                 "do-not-disturb", "notifiers", "owner-user", "owner-name", "owner-password", "problem")
+                 "do-not-disturb", "notifiers", "owner-user", "owner-name", "owner-password",
+                 "unlocking-auto", "unlocking-tpm", "unlocking-keys", "unlocking-key", "problem")
 # the time zone the Date and time page sets and puts back, with what date calls it at either time of
 # year. a drive where no zone was ever chosen is in UTC
 SETTINGS_ZONE = ("Pacific/Auckland", ("NZST", "NZDT"))
@@ -2734,6 +2735,66 @@ def main():
         fail("the hardware services: " + "; ".join(problems))
     ok("the print scheduler is running with avahi and cups-browsed beside it, avahi announces nothing, "
        "sane answers, the firmware daemon names its version, and every firmware write is refused")
+
+    # 2h. security keys. no FIDO2 token exists in a virtual machine and none can be made, so what is
+    # checked here is the code path and its refusals (ADR-0081): the page and the commands say no key
+    # opens the drive, adding one says nothing is plugged in, removing a keyslot that holds no key
+    # says so, the header is untouched by any of it, and the passphrase still opens persist.
+    # systemd-cryptenroll --fido2-device=list exits 0 with an empty stdout and says so on stderr,
+    # which is what "no key" reads as
+    def fido2_tokens(what):
+        """How many security keys the header of persist holds."""
+        status, output = run("echo tokens=(sudo cryptsetup luksDump --dump-json-metadata "
+                             "/dev/disk/by-partlabel/persist | grep -o systemd-fido2 | count)", what)
+        found = re.search(r"tokens=(\d+)", without_console(output))
+        if status != 0 or not found:
+            fail(f"could not count the security keys {what}: {without_console(output).strip()!r}")
+        return int(found.group(1))
+
+    if fido2_tokens("before anything was enrolled") != 0:
+        fail("the header of persist holds a security key on a machine that has none")
+    status, output = run("sudo systemd-cryptenroll --fido2-device=list", "the fido2 devices systemd lists")
+    listed = without_console(output)
+    if status != 0 or "No FIDO2 devices found" not in listed:
+        fail(f"systemd-cryptenroll --fido2-device=list exited with {status}: {listed.strip()[-200:]!r}")
+    status, output = run("rift host keys", "the security keys that open the drive")
+    said = " ".join(without_console(output).split())
+    if status != 0 or "No security key opens this drive." not in said or "enroll-key" not in said:
+        fail(f"rift host keys exited with {status} and said {said!r}")
+    ok(f"no security key opens the drive and rift host keys says so: {said!r}")
+
+    # adding one with nothing plugged in is refused, and the drive is as it was
+    status, output = run("sudo rift host enroll-key", "adding a security key with none plugged in")
+    refused = " ".join(without_console(output).split())
+    if status == 0 or "No security key is plugged in" not in refused or "Plug one in" not in refused:
+        fail(f"rift host enroll-key with no key exited with {status} and said {refused!r}")
+    if fido2_tokens("after the refusal") != 0:
+        fail("the refusal on a machine with no security key enrolled one anyway")
+    # and without root it says which command to run instead, before it looks for a key at all
+    status, output = run("rift host enroll-key", "adding a security key without root")
+    needs_root = " ".join(without_console(output).split())
+    if status == 0 or "needs root" not in needs_root or "sudo rift host enroll-key" not in needs_root:
+        fail(f"rift host enroll-key without root exited with {status} and said {needs_root!r}")
+    ok(f"adding one is refused with no key plugged in and without root, and the header is untouched: {refused!r}")
+
+    # taking off a keyslot that holds no security key is refused, and the passphrase slot is never one
+    for slot, what in (("0", "the passphrase slot"), ("7", "a keyslot that is empty")):
+        status, output = run(f"rift host remove-key {slot}", f"taking off {what}")
+        refused = " ".join(without_console(output).split())
+        if status == 0 or f"Keyslot {slot} does not hold a security key" not in refused:
+            fail(f"rift host remove-key {slot} exited with {status} and said {refused!r}")
+    status, output = run("rift host remove-key seven", "taking off a keyslot that is not a number")
+    refused = " ".join(without_console(output).split())
+    if status == 0 or "is not a keyslot" not in refused:
+        fail(f"rift host remove-key seven exited with {status} and said {refused!r}")
+    if fido2_tokens("after the refusals to remove one") != 0:
+        fail("a refused removal changed the header")
+    status, output = run(f"printf '%s' '{passphrase}' | sudo cryptsetup open --test-passphrase "
+                         "--key-file - /dev/disk/by-partlabel/persist", "the passphrase after all of it")
+    if status != 0:
+        fail(f"the passphrase no longer opens persist: {without_console(output).strip()[-300:]!r}")
+    ok("taking off a keyslot that holds no security key is refused, including the passphrase slot, "
+       "and the passphrase still opens persist")
 
     # 3. orbit: the profile it wrote into @hosts, and the same answers on the system bus.
     # fish puts a bare \r before a command's output, so these anchor on the whitespace after the
@@ -6490,6 +6551,12 @@ def main():
                 return {key: said[key] for key in ("owner-user", "owner-name", "owner-password", "problem")
                         if key in said}
 
+            def owner_unlocking(what):
+                """What the Unlocking part of the page says opens the drive."""
+                said = settings_state(what)
+                return {key: said[key] for key in ("unlocking-auto", "unlocking-tpm", "unlocking-keys",
+                                                   "problem") if key in said}
+
             def owner_getent(what):
                 """The full name getent gives the owner's account."""
                 _, told = run(f"getent passwd {OWNER_USER} | cut -d: -f5", what)
@@ -6536,9 +6603,34 @@ def main():
                     != (OWNER_USER, getent_before, "image") or getent_before != OWNER_NAME:
                 fail(f"the Owner page says {owner_before}, and getent names the owner {getent_before!r}, expected "
                      f"{OWNER_USER} called {OWNER_NAME} with the image's password")
+            # the Unlocking part of the page: what opens the drive besides its passphrase (ADR-0081).
+            # this machine has no tpm and nothing is plugged in, so it says so and both rows are there
+            unlocking_before = wait_for(30, lambda: next(
+                (said for said in [owner_unlocking("the Unlocking rows as the page comes up")]
+                 if "unlocking-auto" in said), None))
+            if not unlocking_before:
+                fail("the Owner page says nothing about unlocking the drive, and Vault is there to ask")
+            if (unlocking_before.get("unlocking-auto"), unlocking_before.get("unlocking-tpm"),
+                    unlocking_before.get("unlocking-keys")) != ("off", "no", "0"):
+                fail(f"the Unlocking rows say {unlocking_before}, expected no tpm, no sealed key and no "
+                     f"security key on a machine that has none")
             point(args.qmp, size, (width - round(60 * scale), height - dock_rows - round(60 * scale)))
             look(f"{SETTINGS_APP} on the Owner page", f"{stem}-settings-owner{extension}", 60,
                  apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            # pressing either of them goes to Vault, which refuses both on this machine and says why
+            run("rift-settings --set auto-unlock {}".format(passphrase.strip()),
+                "sealing a key from the page on a machine the owner has said nothing about")
+            if not wait_for(20, lambda: "said is theirs" in owner_unlocking(
+                    "the page after it asked to seal a key").get("problem", "")):
+                fail(f"after the page asked to seal a key it says {owner_unlocking('the page again')}")
+            run("rift-settings --set remove-key 7", "taking a security key off from the page")
+            if not wait_for(20, lambda: "Keyslot 7 does not hold a security key" in owner_unlocking(
+                    "the page after it asked to remove a key").get("problem", "")):
+                fail(f"after the page asked to remove keyslot 7 it says {owner_unlocking('the page again')}")
+            if owner_unlocking("the rows after both refusals").get("unlocking-keys") != "0":
+                fail("a refusal on the page changed what opens the drive")
+            ok(f"the Owner page says what opens the drive, {unlocking_before}, and Vault refuses both "
+               f"a key sealed on a borrowed machine and a keyslot that holds no security key")
             owner_width_before = owner_lock(OWNER_NAME, f"{stem}-owner-lock{extension}", "with the image's name")
             type_line(PASSWORD, "the image's password")
             locked_hint("no", "after the image's password on the lock screen with the image's name")
