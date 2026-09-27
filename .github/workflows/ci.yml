@@ -573,6 +573,7 @@ jobs:
             graphical.log
             boot-style.log
             tpm.log
+            tpmstate/*/swtpm.log
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: always()
