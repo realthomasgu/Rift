@@ -350,7 +350,10 @@
                     wait "$qemu" || true
                   fi
                   if [ -n "$swtpm" ]; then
+                    # waited for, not just killed: it writes the tpm's state on its way out, and a
+                    # later boot given the same directory would find the lock still held
                     kill "$swtpm" 2>/dev/null || true
+                    wait "$swtpm" 2>/dev/null || true
                   fi
                   rm -rf "$work"
                 }
