@@ -40,21 +40,24 @@ def masks(prefix, names):
     return " ".join(f"{prefix}systemd.mask={name}" for name in names)
 
 
-# what to try, in order. the first is the control: it is what main does today
+# what to try, in order. the first is the control: it is what main does today.
+#
+# The last probe found that masking initrd-fs.target, or the mounts under it, both end in emergency
+# mode within seconds: systemd-sysroot-fstab-check asks for initrd-fs.target by name, and it is run
+# by initrd-parse-etc.service, which carries OnFailure=emergency.target. Nothing requires that
+# service, so masking it as well should leave the initrd with nothing to say about persist at all.
+# rd.systemd.wants= stands in for the one change this cannot test from the command line: in the real
+# thing ghost-mode.service hangs off initrd.target instead of the target that is now masked
+INITRD = (
+    "rd.systemd.mask=initrd-fs.target rd.systemd.mask=initrd-parse-etc.service "
+    "rd.systemd.wants=ghost-mode.service"
+)
 TRIES = [
     ("as it is today", GHOST),
+    ("the initrd told to leave persist alone", f"{GHOST} {INITRD}"),
     (
-        "masking initrd-fs.target",
-        f"{GHOST} rd.systemd.mask=initrd-fs.target",
-    ),
-    (
-        "masking each mount under sysroot",
-        f"{GHOST} " + masks("rd.", [f"sysroot-{name}.mount" for name in PERSIST]),
-    ),
-    (
-        "masking initrd-fs.target and each mount on the other side of the switch",
-        f"{GHOST} rd.systemd.mask=initrd-fs.target "
-        + masks("", [f"{name}.mount" for name in PERSIST]),
+        "and each mount masked on the other side of the switch",
+        f"{GHOST} {INITRD} " + masks("", [f"{name}.mount" for name in PERSIST]),
     ),
 ]
 
@@ -65,7 +68,7 @@ def main():
     ap.add_argument("image")
     ap.add_argument("passfile")
     ap.add_argument("--log", default="ghost-probe.log")
-    ap.add_argument("--seconds", type=int, default=240, help="how long each boot gets")
+    ap.add_argument("--seconds", type=int, default=300, help="how long each boot gets")
     args = ap.parse_args()
 
     log = open(args.log, "w", encoding="utf-8")
