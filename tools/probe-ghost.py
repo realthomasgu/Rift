@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Probe: boot an esp holding one two profile uki three ways and say what the firmware did.
+"""Probe: how a person, and a test, pick the second entry of a two profile uki.
 
-1. nothing typed: which profile systemd-boot picks by itself.
-2. space held from the start, then return: whether a hidden menu comes up, what its entries are
-   called, which one it starts on, and a picture of it.
-3. the number 2 pressed from the start: whether systemd-boot boots the second entry outright.
+Holding a key down from the start of a boot does not work: the firmware's boot stage reads the
+keyboard too, and by the time systemd-boot polls for one the buffer is empty. What the firmware
+does print on the serial console is `BdsDxe: starting Boot...` a fraction of a second before it
+starts the loader, so that line is the anchor: the key goes in the moment it appears.
 
-The answer in each case is the kernel's own "Command line:" line, which names the profile the stub
-handed it, and for 2 the picture of the menu.
+Two esps, one with `timeout 0` (the menu hidden, which is what the image ships) and one with
+`timeout 3` (a menu at every boot). Each is booted with the keys that should pick the second entry.
+The answer is the kernel's own "Command line:" line, which names the profile the stub handed it,
+and a picture of the screen while the menu is up.
 """
 
 import argparse
@@ -22,6 +24,8 @@ import time
 
 # the kernel prints this before it looks for an init, so it is the one line every run gets
 CMDLINE = re.compile(r"Command line: (.*)")
+# and the firmware prints this a fraction of a second before it starts the loader on the esp
+HANDOFF = re.compile(r"BdsDxe: starting Boot")
 
 
 def qmp(path, *commands):
@@ -58,21 +62,21 @@ def qmp(path, *commands):
     return replies[1:]
 
 
-def key(qmp_path, name, code):
-    try:
-        qmp(qmp_path, {"execute": "send-key", "arguments": {"keys": [{"type": "qcode", "data": code}]}})
-        return True
-    except Exception as e:  # the socket is not up yet, or qemu has gone
-        print(f"{name}: send-key {code}: {e}", flush=True)
-        return False
+def key(qmp_path, name, code, times=1):
+    for _ in range(times):
+        try:
+            qmp(qmp_path, {"execute": "send-key", "arguments": {"keys": [{"type": "qcode", "data": code}]}})
+        except Exception as e:
+            print(f"{name}: send-key {code}: {e}", flush=True)
+            return False
+    return True
 
 
-def run(args, name, hold=None, held=0.0, press=None, shots=(), seconds=90):
-    """Boot once and return what the serial console said.
+def run(args, name, esp, bursts, shot=None, shot_after=2.0, seconds=90):
+    """Boot an esp once and return what the serial console said.
 
-    hold is a key sent every 100 ms for the first held seconds, the way a person holds one down.
-    press is a list of (seconds from the start, key) sent once each. shots is a list of
-    (seconds from the start, file) ppms of the screen.
+    bursts is a list of (seconds after the firmware hands the loader the machine, key, how many
+    times) sent in order.
     """
     work = os.path.abspath(f"probe-{name}")
     os.makedirs(work, exist_ok=True)
@@ -90,7 +94,7 @@ def run(args, name, hold=None, held=0.0, press=None, shots=(), seconds=90):
         "-m", "2048",
         "-drive", f"if=pflash,format=raw,readonly=on,file={os.path.join(args.firmware, 'OVMF_CODE.fd')}",
         "-drive", f"if=pflash,format=raw,file={vars_fd}",
-        "-drive", f"if=none,id=esp,format=raw,file={os.path.abspath(args.esp)}",
+        "-drive", f"if=none,id=esp,format=raw,file={os.path.abspath(esp)}",
         "-device", "nvme,drive=esp,serial=esp",
         "-device", "virtio-vga",
         "-display", "none",
@@ -104,33 +108,7 @@ def run(args, name, hold=None, held=0.0, press=None, shots=(), seconds=90):
     print(f"\n==== {name}: {' '.join(cmd)}", flush=True)
     child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     start = time.monotonic()
-
-    def typing():
-        while hold and time.monotonic() - start < held:
-            key(qmp_path, name, hold)
-            time.sleep(0.1)
-        for at, code in press or []:
-            while time.monotonic() - start < at:
-                time.sleep(0.1)
-            print(f"{name}: pressing {code} at {time.monotonic() - start:.0f}s", flush=True)
-            key(qmp_path, name, code)
-
-    def pictures():
-        for at, shot in shots:
-            while time.monotonic() - start < at:
-                time.sleep(0.1)
-            try:
-                qmp(qmp_path, {"execute": "screendump", "arguments": {"filename": os.path.abspath(shot)}})
-                print(f"{name}: {shot} at {time.monotonic() - start:.0f}s", flush=True)
-            except Exception as e:
-                print(f"{name}: screendump {shot}: {e}", flush=True)
-
-    threading.Thread(target=typing, daemon=True).start()
-    if shots:
-        threading.Thread(target=pictures, daemon=True).start()
-
-    # the serial console is read on a thread of its own: a run that never boots anything prints
-    # nothing at all, and a blocking read of a pipe with nothing in it would outlast the deadline
+    handoff = threading.Event()
     said = []
 
     def reading():
@@ -140,15 +118,37 @@ def run(args, name, hold=None, held=0.0, press=None, shots=(), seconds=90):
                 return
             said.append(line.decode("utf-8", "replace").rstrip("\r\n"))
             print(f"{name}| {said[-1]}", flush=True)
+            if HANDOFF.search(said[-1]):
+                handoff.set()
 
-    reader = threading.Thread(target=reading, daemon=True)
-    reader.start()
+    threading.Thread(target=reading, daemon=True).start()
+
+    def typing():
+        if not handoff.wait(60):
+            print(f"{name}: the firmware never said it was starting the loader", flush=True)
+            return
+        began = time.monotonic()
+        print(f"{name}: the firmware started the loader at {began - start:.1f}s", flush=True)
+        for at, code, times in bursts:
+            while time.monotonic() - began < at:
+                time.sleep(0.02)
+            if key(qmp_path, name, code, times):
+                print(f"{name}: {code} x{times} at {time.monotonic() - began:.2f}s after the handoff", flush=True)
+        if shot:
+            while time.monotonic() - began < shot_after:
+                time.sleep(0.05)
+            try:
+                qmp(qmp_path, {"execute": "screendump", "arguments": {"filename": os.path.abspath(shot)}})
+                print(f"{name}: {shot} at {time.monotonic() - began:.1f}s after the handoff", flush=True)
+            except Exception as e:
+                print(f"{name}: screendump {shot}: {e}", flush=True)
+
+    threading.Thread(target=typing, daemon=True).start()
+
     while time.monotonic() - start < seconds:
         if child.poll() is not None:
             break
         if any(CMDLINE.search(line) for line in list(said)):
-            # the kernel has its command line, which is the whole answer. a moment for the lines
-            # after it and then stop
             time.sleep(3)
             break
         time.sleep(0.5)
@@ -170,9 +170,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--qemu", required=True)
     ap.add_argument("--firmware", required=True, help="the FV directory with OVMF_CODE.fd and OVMF_VARS.fd")
-    ap.add_argument("--esp", required=True)
+    ap.add_argument("--esp", required=True, help="an esp whose loader.conf says timeout 0")
+    ap.add_argument("--esp-timeout", required=True, help="the same esp whose loader.conf says timeout 3")
     ap.add_argument("--log", default="ghost-probe.log")
-    ap.add_argument("--shot", default="ghost-probe-menu.ppm")
     args = ap.parse_args()
 
     log = open(args.log, "w", encoding="utf-8")
@@ -188,16 +188,19 @@ def main():
 
     sys.stdout = Tee()
 
+    # the space bar as soon as the loader has the machine, then a step down and return. the picture
+    # is taken while the menu is still waiting for the return
+    keys = [(0.0, "spc", 20), (1.5, "down", 1), (3.0, "ret", 1)]
     found = {}
-    # the firmware hands the esp's loader the machine about eight seconds in, and systemd-boot polls
-    # for a key only then, so the key is held well past that
-    found["space held, then down and return"] = answer(
-        run(args, "menu", hold="spc", held=14, press=[(20, "down"), (24, "ret")],
-            shots=[(18, args.shot), (22, "ghost-probe-menu-down.ppm")], seconds=120)
+    found["timeout 0, space on the handoff"] = answer(
+        run(args, "hidden", args.esp, keys, shot="ghost-probe-hidden.ppm", shot_after=2.2)
     )
-    found["2 held"] = answer(
-        run(args, "second", hold="2", held=14, shots=[(18, "ghost-probe-second.ppm")], seconds=90)
+    found["timeout 3, space on the handoff"] = answer(
+        run(args, "timeout", args.esp_timeout, keys, shot="ghost-probe-menu.ppm", shot_after=2.2)
     )
+    # and the same esp with a timeout, left alone: the menu has to come up and then boot the first
+    found["timeout 3, nothing typed"] = answer(run(args, "alone", args.esp_timeout, [], seconds=60))
+
     print("\n==== what the firmware did ====")
     for what, line in found.items():
         which = "?" if not line else "ghost" if "rift.probe=ghost" in line else "base" if "rift.probe=base" in line else "neither"

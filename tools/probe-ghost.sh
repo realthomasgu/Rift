@@ -90,6 +90,11 @@ printf 'timeout 0\neditor no\n' > loader.conf
 $mcopy -i esp.img loader.conf ::/loader/loader.conf
 probe-mtools/bin/mdir -i esp.img -/ ::/ || true
 
+# and the same esp with a menu at every boot, to compare
+cp esp.img esp3.img
+printf 'timeout 3\neditor no\n' > loader3.conf
+$mcopy -D o -i esp3.img loader3.conf ::/loader/loader.conf
+
 echo "== what rd.luks=0 does to a crypttab entry =="
 # the generator reads /etc/crypttab and the kernel command line. a mount namespace of its own gets
 # a crypttab like the image's, and SYSTEMD_PROC_CMDLINE is what systemd's own tests use
@@ -114,5 +119,5 @@ python3 tools/probe-ghost.py \
   --qemu probe-qemu/bin/qemu-system-x86_64 \
   --firmware "$ovmf/FV" \
   --esp esp.img \
-  --log ghost-probe.log \
-  --shot ghost-probe-menu.ppm
+  --esp-timeout esp3.img \
+  --log ghost-probe.log
