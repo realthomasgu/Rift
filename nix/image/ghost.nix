@@ -18,9 +18,6 @@
 }:
 let
   inherit (config.system.boot.loader) ukiFile;
-  inherit (config.image.repart) verityStore;
-  verityType =
-    config.image.repart.partitions.${verityStore.partitionIds.store-verity}.repartConfig.Type;
 
   # the command line the base profile gets, the way nix/image's verity store builds it. the usrhash
   # is only known once the store's hash tree is built, so both profiles are written in one go
@@ -81,10 +78,14 @@ in
       }
       ''
         mkdir -p $out
-        usrhash=$(jq -r \
-          '.[] | select(.type=="${verityType}") | .roothash' \
-          ${config.system.build.intermediateImage}/repart-output.json
-        )
+        # the one partition with a hash tree is the store's. systemd-repart writes the
+        # architecture's own name for its type, usr-x86-64-verity, and not the short usr-verity the
+        # partition is configured with, so the hash is found by being a hash and not by a name
+        usrhash=$(jq -r -e '
+          map(select(.roothash != null))
+          | if length == 1 then .[0].roothash
+            else error("expected one partition with a hash tree, found \(length)") end
+        ' ${config.system.build.intermediateImage}/repart-output.json)
 
         # a profile binary holds no kernel: only the sections that differ from the base, with
         # .profile first in it
