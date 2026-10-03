@@ -20,6 +20,7 @@ in
     "${modulesPath}/image/repart-verity-store.nix"
     ./persist.nix
     ./ab-sysupdate.nix
+    ./ghost.nix
   ];
 
   boot.loader.grub.enable = false;
@@ -29,12 +30,15 @@ in
   system.image.id = "rift";
   system.image.version = "0.1.0";
 
-  # root is tmpfs. the store is the verity partition, everything personal is on persist
+  # root is tmpfs. the store is the verity partition, everything personal is on persist, and in
+  # ghost mode nothing is on persist, so home and var are in here too. half the memory is a
+  # ceiling and not a reservation: a tmpfs holds only what is written to it, and zram swap takes
+  # what it holds under pressure
   fileSystems."/" = {
     fsType = "tmpfs";
     options = [
       "mode=0755"
-      "size=25%"
+      "size=50%"
     ];
   };
 
@@ -48,12 +52,15 @@ in
     partitions = {
       "00-esp" = {
         # the firmware starts systemd-boot from the removable media path, nothing is written to its
-        # variables. no menu unless a key is held, and no editing the command line
+        # variables, and the command line cannot be edited. the menu is drawn for three seconds at
+        # every boot, because the drive has two entries since ADR-0082 and a key held down while the
+        # firmware starts does not reach systemd-boot: the firmware's own boot stage reads the
+        # keyboard until it hands the loader the machine. any key stops the countdown
         contents = {
           "/EFI/BOOT/BOOTX64.EFI".source = systemdBoot;
           "/EFI/systemd/systemd-bootx64.efi".source = systemdBoot;
           "/loader/loader.conf".source = pkgs.writeText "loader.conf" ''
-            timeout 0
+            timeout 3
             editor no
           '';
         };
