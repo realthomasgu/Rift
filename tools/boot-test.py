@@ -2573,15 +2573,28 @@ def main():
         entry = re.search(r"Current Entry:\s*(\S+)", printed)
         if not entry or entry.group(1) != uki:
             fail(f"systemd-boot started {entry.group(1) if entry else 'no entry'}, expected {uki}")
-        # systemd-boot titles a uki from the PRETTY_NAME in it, and bootctl marks the default and
-        # the selected entry after the title
+        # systemd-boot titles a uki from the PRETTY_NAME in it, and a uki with two profiles gets an
+        # entry for each, the second with the profile's own name after it (ADR-0082). bootctl marks
+        # the default and the selected entry after the title, and names the first profile after its
+        # id where the menu itself leaves it off, so a bracket of lower case words is a mark and not
+        # part of the title. The entries that are not ukis on the drive, like the one the boot
+        # loader reported it started, carry no branding of ours
         _, output = run("sudo bootctl list --no-pager", "bootctl list")
         printed = without_console(output)
-        listed = re.findall(r"^\s*title:\s*(.*?)\s*\n\s*id:\s*rift_(\d+\.\d+\.\d+)[^\n]*$", printed, re.M)
-        titles = [(re.sub(r"(?:\s+\([a-z/ ]+\))+$", "", title), version) for title, version in listed]
-        if not titles or any(title != f"Rift {version}" for title, version in titles):
+        titles = []
+        for block in re.split(r"\n\s*\n", printed):
+            if "Type #2" not in block:
+                continue
+            title = re.search(r"^\s*title:\s*(.*?)\s*$", block, re.M)
+            listed = re.search(r"^\s*version:\s*(\S+)\s*$", block, re.M)
+            if title and listed:
+                titles.append((re.sub(r"(?:\s+\([a-z/ ]+\))+$", "", title.group(1)), listed.group(1)))
+        wanted = [(f"Rift {version}", f"Rift {version} (Ghost mode)") for _, version in titles]
+        if (not titles or any(title not in pair for (title, _), pair in zip(titles, wanted))
+                or not any(title.endswith("(Ghost mode)") for title, _ in titles)):
             print(f"\nboot-test: bootctl list printed:\n{printed}", flush=True)
-            fail(f"systemd-boot's entries are titled {titles}, expected Rift and each one's version")
+            fail(f"systemd-boot's entries are titled {titles}, expected Rift and each one's version, "
+                 f"with a Ghost mode entry among them")
         return loader.group(1)
 
     def unit_state(unit):
