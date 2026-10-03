@@ -57,10 +57,17 @@ rev = "4cf0b62028039661477d482ec4758b687d8f4392"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+# CI runs the stable toolchain and the flake pins an older one, so a lint turned off below may be a
+# name this compiler has never heard of. Without this, turning one off breaks the other compiler
+unknown_lints = "allow"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+# the groups take a lower priority than the lints under them, so one of those can be turned off
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# assert!(xs.is_empty()) says what it means. The lint wants assert_eq! against an empty array wearing
+# the element type, which is longer and reads worse, and every one of ours is in a test
+assert_is_empty = "allow"
 
 [profile.release]
 lto = "thin"
