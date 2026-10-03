@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   probe:
-    name: a second boot entry for one kernel
+    name: what stops the initrd waiting for persist
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -34,7 +34,9 @@ jobs:
       - name: Allow user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Probe
-        run: bash tools/probe-ghost.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/probe-ghost.sh 37109336532
       - uses: actions/upload-artifact@v4
         if: always()
         continue-on-error: true
@@ -42,5 +44,4 @@ jobs:
           name: ghost-probe
           path: |
             ghost-probe.log
-            ghost-probe-*.ppm
           if-no-files-found: ignore
