@@ -125,14 +125,29 @@ def run(args, name, hold=None, held=0.0, press=None, shot=None, shot_at=0.0, sec
     if shot:
         threading.Thread(target=picture, daemon=True).start()
 
+    # the serial console is read on a thread of its own: a run that never boots anything prints
+    # nothing at all, and a blocking read of a pipe with nothing in it would outlast the deadline
     said = []
+
+    def reading():
+        while True:
+            line = child.stdout.readline()
+            if not line:
+                return
+            said.append(line.decode("utf-8", "replace").rstrip("\r\n"))
+            print(f"{name}| {said[-1]}", flush=True)
+
+    reader = threading.Thread(target=reading, daemon=True)
+    reader.start()
     while time.monotonic() - start < seconds:
-        line = child.stdout.readline()
-        if not line:
+        if child.poll() is not None:
             break
-        line = line.decode("utf-8", "replace").rstrip("\r\n")
-        said.append(line)
-        print(f"{name}| {line}", flush=True)
+        if any(CMDLINE.search(line) for line in list(said)):
+            # the kernel has its command line, which is the whole answer. a moment for the lines
+            # after it and then stop
+            time.sleep(3)
+            break
+        time.sleep(0.5)
     child.kill()
     child.wait()
     print(f"{name}: ended after {time.monotonic() - start:.0f}s", flush=True)
