@@ -2392,12 +2392,13 @@ def main():
         # write to the esp. it has to have happened before the drive is counted, or the ghost boot
         # would be blamed for it
         def uki_blessed():
-            _, output = run("sudo ls /boot/EFI/Linux", "the uki on the esp")
-            said = without_console(output)
-            return said if ".efi" in said and "+" not in said else None
+            _, output = run("sudo ls -1 /boot/EFI/Linux", "the uki on the esp")
+            names = [line.strip() for line in without_console(output).splitlines()
+                     if line.strip().endswith(".efi")]
+            return names if names and not any("+" in name for name in names) else None
 
         if not waiting(240, uki_blessed):
-            _, output = run("sudo ls /boot/EFI/Linux", "the uki on the esp once more")
+            _, output = run("sudo ls -1 /boot/EFI/Linux", "the uki on the esp once more")
             fail(f"the uki still has a boot counter after the first boot: {without_console(output).strip()!r}")
         ok("the first boot was blessed, so the uki on the esp has no counter left to write")
         power_off()
