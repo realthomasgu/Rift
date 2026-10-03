@@ -550,6 +550,16 @@ jobs:
         run: |
           python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --boot-style \
             --log boot-style.log --splash boot-style-splash.png --timeout 1200
+      - name: Boot the ghost entry
+        # the drive's second boot entry: persist stays locked and the whole session is in memory.
+        # the same drive is booted three times out of one file, so this runs after the steps that
+        # need the other disks, and its drive goes before the tpm run makes its own
+        run: |
+          rm -f clone.img updates.img stick.img locked.img backup.img
+          df -h .
+          python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --ghost ghoststate \
+            --ghost-menu boot-menu.png --log ghost.log --timeout 1800
+          rm -rf ghoststate
       - name: Boot with a software tpm
         # a key for persist sealed to the machine's tpm, so an owned machine opens the drive with
         # nothing typed. swtpm keeps each machine's tpm in a directory, and the same drive is booted
@@ -557,7 +567,6 @@ jobs:
         # after the key is wiped. The disks the boots above needed are gone by here, which leaves
         # room for the drive this one keeps between its boots
         run: |
-          rm -f clone.img updates.img stick.img locked.img backup.img
           df -h .
           python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --tpm tpmstate \
             --log tpm.log --timeout 1800
@@ -572,6 +581,7 @@ jobs:
             first-boot.log
             graphical.log
             boot-style.log
+            ghost.log
             tpm.log
             tpmstate/*/swtpm.log
           if-no-files-found: ignore
@@ -587,6 +597,7 @@ jobs:
             boot-style-splash.png
             boot-style-splash-graphical.png
             boot-style-splash-text.png
+            boot-menu.png
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         id: screendumps
@@ -602,7 +613,7 @@ jobs:
         # log, and `gh run view --log | base64 -d` gets the png back
         if: always() && steps.screendumps.outcome == 'failure'
         run: |
-          for f in splash.png first-boot-splash.png graphical-splash.png boot-style-splash*.png desktop*.png; do
+          for f in splash.png first-boot-splash.png graphical-splash.png boot-style-splash*.png boot-menu.png desktop*.png; do
             [ -f "$f" ] || continue
             echo "::group::$f"
             base64 -w0 "$f"; echo

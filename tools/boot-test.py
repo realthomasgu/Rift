@@ -70,6 +70,15 @@ zone, which timedated keeps on persist. The Keyboard page adds English (UK) befo
 takes it off before the second: localed and horizon have it in the boot after the first, and localed
 has English (US) alone after the second, which localed keeps on persist too. The test ends there.
 
+With --ghost the test boots the drive's second entry, Ghost mode, instead of the checks below. It
+boots the drive three times, keeping it in a file between them: ordinarily, with a file written into
+home; then the ghost entry, held out of systemd-boot's hidden menu with the space bar sent through
+the qemu monitor, where persist is not open, no unit for it was ever made, home is a tmpfs with
+nothing of the drive in it, the esp and the exchange partition are both unmounted and the machine id
+is one of its own; then ordinarily again, where the file written in the ghost session is gone and the
+one written before it is still there. The whole drive is hashed before the ghost boot and after it
+and the two have to match. --ghost-menu saves a picture of the menu with both entries in it.
+
 The drive: the vm app writes it from the image into a sparse file with rift-flash, with an exchange
 partition when --exchange gives its size. Persist has to be luks2 with argon2id, the settings a person
 gets, with every subvolume and the owner's home, and the exchange partition an exfat labelled EXCHANGE
@@ -161,6 +170,7 @@ import base64
 import collections
 import functools
 import glob
+import hashlib
 import http.server
 import json
 import math
@@ -189,6 +199,10 @@ AGAIN = r"Type the passphrase again"
 COMMAND_START = r"\x1b\]133;C[^\x07\x1b]*(?:\x07|\x1b\\)"
 COMMAND_END = r"\x1b\]133;D;(\d+)(?:\x07|\x1b\\)"
 ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?>=]*[A-Za-z]|\x1b[=>]")
+# the line the firmware prints a fraction of a second before it starts the loader on the esp. it is
+# the only moment a key reaches systemd-boot's menu, since the firmware's own boot stage reads the
+# keyboard until then
+HANDOFF = r"BdsDxe: starting Boot"
 # a line of the journal on the serial console, with the two line ends it comes with. it can land in
 # the middle of a line a command prints, between two of its writes
 JOURNAL = re.compile(r"(?:^[ \t]*)?\[\s*\d+\.\d+\] [^\n]*\n{0,2}", re.M)
@@ -1542,6 +1556,10 @@ def main():
                     "key: add it as a remote, install its app from Welcome and run it with the portals")
     ap.add_argument("--offline", help="boot with no network card, check Welcome opens on the page that says so, save "
                     "its screendump as this png, and that it opens again after Open later and a reboot")
+    ap.add_argument("--ghost", help="boot the drive's ghost entry, which leaves persist locked and keeps the "
+                    "session in memory, and check that nothing of it reaches the drive. This directory holds the "
+                    "drive the three boots share")
+    ap.add_argument("--ghost-menu", help="save a picture of systemd-boot's menu, with both entries in it, as this png")
     ap.add_argument("--tpm", help="give the machine a software tpm, seal a key for persist to it from the owned "
                     "machine's shell, and boot the same drive five times: with the key, on another machine's tpm, "
                     "back on its own, and after the key is wiped. This directory holds the tpm state")
@@ -1550,12 +1568,16 @@ def main():
         ap.error("--boot-style needs --splash, which names the png its screendumps are saved beside")
     if args.tpm and args.first_boot:
         ap.error("--tpm writes the drive with its persist, so it does not go with --first-boot")
+    if args.ghost and args.first_boot:
+        ap.error("--ghost writes the drive with its persist, so it does not go with --first-boot")
+    if args.ghost and args.tpm:
+        ap.error("--ghost and --tpm each keep a drive of their own, so they are separate runs")
     with open(args.passfile, encoding="utf-8") as f:
         passphrase = f.read()
 
     work = tempfile.mkdtemp(prefix="rift-boot-")
     if (args.splash or args.desktop or args.updates or args.first_boot or args.boot_style or args.offline
-            or args.tpm) and not args.qmp:
+            or args.tpm or args.ghost) and not args.qmp:
         args.qmp = os.path.join(work, "qmp.sock")
 
     # the app picks kvm or tcg and the firmware. what follows its options replaces its defaults.
@@ -1564,10 +1586,15 @@ def main():
     drive = ["--first-boot"] if args.first_boot else ["--persist", os.path.abspath(args.passfile)]
     # the tpm run boots the same drive again and again, so the drive is written into a file that
     # stays behind, and each boot is given the tpm state of the machine it is pretending to be
-    kept = os.path.abspath(os.path.join(args.tpm, "drive.img")) if args.tpm else None
+    kept = None
     if args.tpm:
+        kept = os.path.abspath(os.path.join(args.tpm, "drive.img"))
         os.makedirs(args.tpm, exist_ok=True)
         drive += ["--drive", kept, "--tpm", os.path.abspath(os.path.join(args.tpm, "own"))]
+    if args.ghost:
+        kept = os.path.abspath(os.path.join(args.ghost, "drive.img"))
+        os.makedirs(args.ghost, exist_ok=True)
+        drive += ["--drive", kept]
     if args.models:
         drive += ["--models", os.path.abspath(args.models)]
     if args.exchange:
@@ -2231,6 +2258,248 @@ def main():
         if "asks for its passphrase at every boot" not in said:
             fail(f"after the key was wiped the drive says {said!r}")
         ok(f"and says so: {said!r}")
+        power_off()
+        print(f"\nboot-test: PASSED in {since()}", flush=True)
+        return
+
+    # 1f. ghost mode: the drive's second boot entry, which leaves persist locked and keeps the whole
+    # session in memory (ADR-0082). The same drive is booted three times: ordinarily, with a file
+    # written into home; then the ghost entry, picked out of systemd-boot's menu with a key held
+    # down through the monitor the way a person holds one; then ordinarily again. The drive's own
+    # bytes are counted before the ghost boot and after it, and not one of them may have changed
+    if args.ghost:
+        KEPT_LETTER = f"/home/{OWNER_USER}/kept.txt"
+        GHOST_LETTER = f"/home/{OWNER_USER}/ghost.txt"
+        kept_words = "written before ghost mode"
+        ghost_words = "written in ghost mode"
+        machine_id = r"^\s*([0-9a-f]{32})\s*$"
+
+        def one_line(command, what, pattern):
+            status, output = run(command, what)
+            found = re.search(pattern, without_console(output), re.M)
+            if status != 0 or not found:
+                fail(f"{what}: {without_console(output).strip()!r}")
+            return found.group(1)
+
+        def contents(path):
+            status, output = run(f"cat {path}", f"what is in {path}")
+            return without_console(output) if status == 0 else f"nothing, cat exited with {status}"
+
+        def drive_bytes(what):
+            """The sha256 of the whole drive file, and one of each gibibyte of it. A boot that
+            writes a byte anywhere on the drive, in the esp, in a boot counter or in the header of
+            persist, changes the first; the second says which part of the drive it was, since the
+            esp is the first gibibyte after the partition table."""
+            whole = hashlib.sha256()
+            parts = []
+            part = hashlib.sha256()
+            read = 0
+            with open(kept, "rb") as drive_file:
+                for block in iter(lambda: drive_file.read(4 << 20), b""):
+                    whole.update(block)
+                    part.update(block)
+                    read += len(block)
+                    if read >= 1 << 30:
+                        parts.append(part.hexdigest())
+                        part = hashlib.sha256()
+                        read = 0
+            parts.append(part.hexdigest())
+            said = whole.hexdigest()
+            print(f"\nboot-test: the drive is {said} {what}, at {since()}", flush=True)
+            return said, parts
+
+        def waiting(seconds, ready):
+            """Poll until ready() answers something, or give up and answer what it last said."""
+            until = time.monotonic() + seconds
+            while True:
+                found = ready()
+                if found or time.monotonic() > until:
+                    return found
+                time.sleep(3)
+
+        def send_key(qmp_path, code, what, times=1):
+            for _ in range(times):
+                try:
+                    qmp(qmp_path, {"execute": "send-key",
+                                   "arguments": {"keys": [{"type": "qcode", "data": code}]}})
+                except Exception as why:
+                    fail(f"send-key {code} {what}: {why}")
+            print(f"\nboot-test: {code}{'' if times == 1 else f' x{times}'} {what}", flush=True)
+
+        def pick_ghost(qmp_path, menu_png):
+            """Pick the ghost entry out of systemd-boot's menu. Holding a key from the start of a
+            boot does not work: the firmware's own boot stage reads the keyboard too, and by the
+            time systemd-boot polls for one the buffer is empty. What the firmware does print on
+            the serial console is the line it starts the loader on the esp with, a fraction of a
+            second before it does, so that is the anchor."""
+            expect([HANDOFF], "the firmware to start the loader on the esp")
+            ok("the firmware started the loader on the esp")
+            # the space bar stops the menu's countdown. it is bound to nothing else, so a run of
+            # them is harmless, and the first one that lands keeps the menu up
+            send_key(qmp_path, "spc", "to stop the menu's countdown", times=20)
+            time.sleep(1)
+            # the ghost entry is the line under the ordinary one
+            send_key(qmp_path, "down", "to move to the ghost entry")
+            time.sleep(0.5)
+            if menu_png:
+                try:
+                    width, height, rgb = screendump(qmp_path, work, "ghost-menu")
+                    write_png(menu_png, width, height, rgb)
+                    print(f"\nboot-test: wrote {menu_png}, {width}x{height}", flush=True)
+                except Exception as why:
+                    print(f"\nboot-test: the picture {menu_png} could not be taken: {why}", flush=True)
+            send_key(qmp_path, "ret", "to start the ghost entry")
+
+        def boot_kept(what, qmp_path, ghost=False, menu_png=None):
+            """Boot the kept drive in a qemu of its own, with a monitor socket of its own. The
+            command line is the first boot's with the drive and the monitor swapped, so every
+            device is the same one and only the keys differ."""
+            nonlocal child
+            again = []
+            values = ("--persist", "--models", "--exchange", "--drive", "-qmp")
+            skip = False
+            for arg in cmd:
+                if skip:
+                    skip = False
+                    continue
+                if arg in values:
+                    skip = True
+                elif arg == "--image":
+                    again += ["--image", kept]
+                    skip = True
+                else:
+                    again.append(arg)
+            again += ["-qmp", f"unix:{qmp_path},server,nowait"]
+            print("\nboot-test: " + " ".join(again), flush=True)
+            child = pexpect.spawn(again[0], again[1:], encoding="utf-8", codec_errors="replace",
+                                  dimensions=(40, 160))
+            child.logfile_read = tee
+            ok(f"booting {what}")
+            if ghost:
+                pick_ghost(qmp_path, menu_png)
+
+        # the first boot is the ordinary one, with the passphrase, and it leaves a file behind
+        status, output = run(f"echo '{kept_words}' > {KEPT_LETTER}", "a file in home before ghost mode")
+        if status != 0 or kept_words not in contents(KEPT_LETTER):
+            fail(f"{KEPT_LETTER} was not written before the ghost boot: {without_console(output).strip()!r}")
+        machine = one_line("cat /etc/machine-id", "the machine id of the ordinary boot", machine_id)
+        _, output = run("findmnt -no SOURCE,FSTYPE /home", "what home is on an ordinary boot")
+        if "/dev/mapper/persist" not in output:
+            fail(f"home is not on persist on the ordinary boot: {without_console(output).strip()!r}")
+        ok(f"{KEPT_LETTER} is in home, the machine id is {machine}, and home is on persist")
+
+        # the counter in the uki's name is dropped once the boot is blessed, and that rename is a
+        # write to the esp. it has to have happened before the drive is counted, or the ghost boot
+        # would be blamed for it
+        def uki_blessed():
+            _, output = run("sudo ls /boot/EFI/Linux", "the uki on the esp")
+            said = without_console(output)
+            return said if ".efi" in said and "+" not in said else None
+
+        if not waiting(240, uki_blessed):
+            _, output = run("sudo ls /boot/EFI/Linux", "the uki on the esp once more")
+            fail(f"the uki still has a boot counter after the first boot: {without_console(output).strip()!r}")
+        ok("the first boot was blessed, so the uki on the esp has no counter left to write")
+        power_off()
+
+        before, before_parts = drive_bytes("before the ghost boot")
+
+        # and now the ghost entry, picked out of the menu systemd-boot draws for three seconds
+        boot_kept("the ghost entry", os.path.join(work, "qmp-ghost.sock"), ghost=True,
+                  menu_png=args.ghost_menu)
+        if expect([PROMPT, PASSPHRASE], "the shell of the ghost boot") == 1:
+            fail("the ghost boot asked for a passphrase, and it has nothing to check one against")
+        ok("shell on the ghost boot, with no passphrase asked for")
+
+        # the words on the command line are what the rest of the system reads
+        _, output = run("cat /proc/cmdline", "the command line of the ghost boot")
+        said = without_console(output)
+        if "rift.ghost" not in said:
+            fail(f"the ghost entry did not boot the ghost profile: {said.strip()[-300:]!r}")
+        if "rd.luks=0" not in said:
+            fail(f"the ghost command line does not turn the luks generator off: {said.strip()[-300:]!r}")
+        ok("the ghost boot runs with rift.ghost and rd.luks=0 on its command line")
+
+        # persist is not open, and the unit that would have opened it was never made
+        status, output = run("sudo cryptsetup status persist", "what cryptsetup says about persist")
+        said = without_console(output)
+        if status == 0 or "inactive" not in said:
+            fail(f"cryptsetup says persist is {said.strip()[-200:]!r} on the ghost boot")
+        _, output = run("ls /dev/mapper", "the device mapper on the ghost boot")
+        if "persist" in without_console(output):
+            fail(f"/dev/mapper holds persist on the ghost boot: {without_console(output).strip()!r}")
+        _, output = run("systemctl list-units --all --no-legend --no-pager 'systemd-cryptsetup@*' | cat",
+                        "the cryptsetup units of the ghost boot")
+        if "persist" in without_console(output):
+            fail(f"the ghost boot has a unit for persist: {without_console(output).strip()!r}")
+        _, output = run("journalctl -b --no-pager -o cat -u systemd-cryptsetup@persist.service | cat",
+                        "the journal of the unit that opens persist")
+        if "Finished" in without_console(output):
+            fail(f"systemd-cryptsetup@persist ran on the ghost boot: {without_console(output).strip()[-300:]!r}")
+        ok("persist is not open on the ghost boot, and nothing was made to open it")
+
+        # home is in memory, with nothing of the drive in it
+        _, output = run("stat -f -c fs=%T /home", "what home is on the ghost boot")
+        if "fs=tmpfs" not in without_console(output):
+            fail(f"home is not a tmpfs on the ghost boot: {without_console(output).strip()!r}")
+        if kept_words in contents(KEPT_LETTER):
+            fail(f"{KEPT_LETTER} from the ordinary boot is readable on the ghost boot")
+        _, output = run(f"stat -c owner=%U:%a /home/{OWNER_USER}", "who owns home on the ghost boot")
+        if f"owner={OWNER_USER}:" not in without_console(output):
+            fail(f"the owner's home on the ghost boot is not theirs: {without_console(output).strip()!r}")
+        ok("home is a tmpfs, it is the owner's own, and nothing the drive keeps is in it")
+
+        # nothing of the drive is mounted: not persist, not the exchange partition, not the esp
+        for folder in ("/persist", "/exchange", "/boot"):
+            status, output = run(f"findmnt -no SOURCE,FSTYPE --mountpoint {folder}",
+                                 f"whether {folder} is mounted on the ghost boot")
+            if status == 0 and without_console(output).strip():
+                fail(f"{folder} is mounted on the ghost boot: {without_console(output).strip()!r}")
+        ok("persist, the exchange partition and the esp are all unmounted on the ghost boot")
+
+        # a machine id of its own and a journal that is only in memory
+        ghost_machine = one_line("cat /etc/machine-id", "the machine id of the ghost boot", machine_id)
+        if ghost_machine == machine:
+            fail(f"the ghost boot has the drive's own machine id {machine}")
+        status, _ = run("test -d /var/log/journal", "whether the journal is kept on the ghost boot")
+        if status == 0:
+            fail("the ghost boot has a journal directory on disk")
+        ok(f"the ghost boot has the machine id {ghost_machine} and a journal only in memory")
+
+        # a file written in it, to prove it is gone at the next boot
+        status, output = run(f"echo '{ghost_words}' > {GHOST_LETTER}", "a file in the ghost session's home")
+        if status != 0 or ghost_words not in contents(GHOST_LETTER):
+            fail(f"{GHOST_LETTER} could not be written on the ghost boot: {without_console(output).strip()!r}")
+        ok(f"{GHOST_LETTER} is in the ghost session's home")
+        power_off()
+
+        after, after_parts = drive_bytes("after the ghost boot")
+        if after != before:
+            changed = [n for n, (was, now) in enumerate(zip(before_parts, after_parts)) if was != now]
+            fail(f"the ghost boot changed the drive: it was {before} and is {after}, in gibibyte "
+                 f"{changed} of it, where 0 holds the partition table and the esp")
+        ok("the ghost boot changed not one byte of the drive")
+
+        # and the ordinary entry again: the ghost session left nothing, and persist still opens
+        boot_kept("the ordinary entry again", os.path.join(work, "qmp-after.sock"))
+        if expect([PASSPHRASE, PROMPT], "the passphrase prompt after the ghost boot") == 1:
+            fail("the boot after the ghost one did not ask for the drive's passphrase")
+        unlock()
+        ok("the boot after the ghost one asked for the passphrase and opened persist with it")
+        if ghost_words in contents(GHOST_LETTER):
+            fail(f"{GHOST_LETTER} from the ghost session is on the drive")
+        if kept_words not in contents(KEPT_LETTER):
+            fail(f"{KEPT_LETTER} from before the ghost boot is gone")
+        if one_line("cat /etc/machine-id", "the machine id after the ghost boot", machine_id) != machine:
+            fail("the drive's machine id changed over the ghost boot")
+        _, output = run("findmnt -no SOURCE,FSTYPE /home", "what home is on after the ghost boot")
+        if "/dev/mapper/persist" not in output:
+            fail(f"home is not on persist after the ghost boot: {without_console(output).strip()!r}")
+        _, output = run("findmnt -no TARGET --mountpoint /exchange", "the exchange partition after the ghost boot")
+        if "/exchange" not in without_console(output):
+            fail("the exchange partition is not mounted again after the ghost boot")
+        ok(f"nothing of the ghost session survived, {KEPT_LETTER} is still there, home is on persist "
+           f"again and the exchange partition is mounted")
         power_off()
         print(f"\nboot-test: PASSED in {since()}", flush=True)
         return
