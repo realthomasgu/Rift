@@ -9,7 +9,10 @@ set -euo pipefail
 echo "== the pieces, all from the binary cache =="
 nix build --inputs-from . nixpkgs#systemd -o probe-systemd -L
 nix build --inputs-from . nixpkgs#systemdUkify -o probe-ukify -L
+# the fd output is the one with the firmware volumes in it, and nix names its link after it
 nix build --inputs-from . nixpkgs#OVMF.fd -o probe-ovmf -L
+ovmf=$(nix build --inputs-from . nixpkgs#OVMF.fd --no-link --print-out-paths | grep -- '-fd$' | head -1)
+ls -R "$ovmf" | head -20
 nix build --inputs-from . nixpkgs#qemu -o probe-qemu -L
 nix build --inputs-from . nixpkgs#linuxPackages.kernel -o probe-kernel -L
 nix build --inputs-from . nixpkgs#dosfstools -o probe-dosfstools -L
@@ -54,7 +57,21 @@ $ukify build \
 ls -l rift_0.1.0+3.efi
 
 echo "== what the two profile uki holds =="
-$ukify inspect --json=pretty rift_0.1.0+3.efi | head -120 || true
+# --json comes before the verb, the way the nixos module calls it
+$ukify --json=pretty inspect rift_0.1.0+3.efi | head -200 || true
+echo "-- what the verity check reads, which has to be the base profile's command line --"
+cat > probe-profiles.py <<'PYEOF'
+import json
+import sys
+
+uki = json.load(sys.stdin)
+print("base .cmdline:", uki.get(".cmdline", {}).get("text"))
+for n, profile in enumerate(uki.get("_profiles", [])):
+    said = profile.get(".profile", {}).get("text")
+    line = profile.get(".cmdline", {}).get("text")
+    print(f"profile {n}: .profile={said!r} .cmdline={line!r}")
+PYEOF
+$ukify --json=short inspect rift_0.1.0+3.efi | python3 probe-profiles.py || true
 echo "-- section order --"
 $ukify inspect rift_0.1.0+3.efi 2>&1 | grep -E "^[a-z.]+:|name:" | head -60 || true
 
@@ -79,7 +96,7 @@ echo "== what rd.luks=0 does to a crypttab entry =="
 printf 'persist /dev/disk/by-partlabel/persist - x-systemd.device-timeout=infinity\n' > probe-crypttab
 gen=probe-systemd/lib/systemd/system-generators/systemd-cryptsetup-generator
 for line in "" "rd.luks=0"; do
-  rm -rf genout && mkdir -p genout/normal genout/early genout/late
+  sudo rm -rf genout && mkdir -p genout/normal genout/early genout/late
   sudo unshare --mount sh -c "
     mount --bind $PWD/probe-crypttab /etc/crypttab
     SYSTEMD_IN_INITRD=1 SYSTEMD_PROC_CMDLINE='$line' \
@@ -95,7 +112,7 @@ sudo apt-get install -y --no-install-recommends python3-pexpect >/dev/null
 if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; ls -l /dev/kvm; else echo "no /dev/kvm, tcg"; fi
 python3 tools/probe-ghost.py \
   --qemu probe-qemu/bin/qemu-system-x86_64 \
-  --firmware probe-ovmf/FV \
+  --firmware "$ovmf/FV" \
   --esp esp.img \
   --log ghost-probe.log \
   --shot ghost-probe-menu.ppm
