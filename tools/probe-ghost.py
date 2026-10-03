@@ -67,12 +67,12 @@ def key(qmp_path, name, code):
         return False
 
 
-def run(args, name, hold=None, held=0.0, press=None, shot=None, shot_at=0.0, seconds=90):
+def run(args, name, hold=None, held=0.0, press=None, shots=(), seconds=90):
     """Boot once and return what the serial console said.
 
     hold is a key sent every 100 ms for the first held seconds, the way a person holds one down.
-    press is a list of (seconds from the start, key) sent once each. shot is a ppm of the screen
-    taken shot_at seconds in.
+    press is a list of (seconds from the start, key) sent once each. shots is a list of
+    (seconds from the start, file) ppms of the screen.
     """
     work = os.path.abspath(f"probe-{name}")
     os.makedirs(work, exist_ok=True)
@@ -115,15 +115,19 @@ def run(args, name, hold=None, held=0.0, press=None, shot=None, shot_at=0.0, sec
             print(f"{name}: pressing {code} at {time.monotonic() - start:.0f}s", flush=True)
             key(qmp_path, name, code)
 
-    def picture():
-        while time.monotonic() - start < shot_at:
-            time.sleep(0.1)
-        if qmp(qmp_path, {"execute": "screendump", "arguments": {"filename": os.path.abspath(shot)}}):
-            print(f"{name}: a picture of the screen at {time.monotonic() - start:.0f}s", flush=True)
+    def pictures():
+        for at, shot in shots:
+            while time.monotonic() - start < at:
+                time.sleep(0.1)
+            try:
+                qmp(qmp_path, {"execute": "screendump", "arguments": {"filename": os.path.abspath(shot)}})
+                print(f"{name}: {shot} at {time.monotonic() - start:.0f}s", flush=True)
+            except Exception as e:
+                print(f"{name}: screendump {shot}: {e}", flush=True)
 
     threading.Thread(target=typing, daemon=True).start()
-    if shot:
-        threading.Thread(target=picture, daemon=True).start()
+    if shots:
+        threading.Thread(target=pictures, daemon=True).start()
 
     # the serial console is read on a thread of its own: a run that never boots anything prints
     # nothing at all, and a blocking read of a pipe with nothing in it would outlast the deadline
@@ -185,13 +189,15 @@ def main():
     sys.stdout = Tee()
 
     found = {}
-    found["nothing typed"] = answer(run(args, "plain", seconds=60))
-    # the menu comes up, a picture is taken, and return starts whichever entry it began on
-    found["space held, then return"] = answer(
-        run(args, "menu", hold="spc", held=8, press=[(20, "ret")], shot=args.shot, shot_at=16, seconds=90)
+    # the firmware hands the esp's loader the machine about eight seconds in, and systemd-boot polls
+    # for a key only then, so the key is held well past that
+    found["space held, then down and return"] = answer(
+        run(args, "menu", hold="spc", held=14, press=[(20, "down"), (24, "ret")],
+            shots=[(18, args.shot), (22, "ghost-probe-menu-down.ppm")], seconds=120)
     )
-    found["2 pressed"] = answer(run(args, "second", hold="2", held=8, seconds=60))
-
+    found["2 held"] = answer(
+        run(args, "second", hold="2", held=14, shots=[(18, "ghost-probe-second.ppm")], seconds=90)
+    )
     print("\n==== what the firmware did ====")
     for what, line in found.items():
         which = "?" if not line else "ghost" if "rift.probe=ghost" in line else "base" if "rift.probe=base" in line else "neither"

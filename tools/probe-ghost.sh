@@ -29,7 +29,7 @@ $ukify build --help 2>&1 | grep -iE -- "--profile|--join-profile|--sign-profile"
 
 echo "== the base and the ghost profile =="
 # a profile section is an env file: ID is what the entry id gets, TITLE what the menu shows
-printf 'ID=main\nTITLE=Rift\n' > base.profile
+printf 'ID=main\n' > base.profile
 printf 'ID=ghost\nTITLE=Ghost mode\n' > ghost.profile
 # the sections of a profile override the base's. a profile binary has no kernel of its own, only
 # the sections that differ, and the .profile section has to be first in it

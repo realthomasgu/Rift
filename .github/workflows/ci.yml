@@ -42,5 +42,5 @@ jobs:
           name: ghost-probe
           path: |
             ghost-probe.log
-            ghost-probe-menu.ppm
+            ghost-probe-*.ppm
           if-no-files-found: ignore
