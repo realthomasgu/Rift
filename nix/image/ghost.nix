@@ -78,13 +78,14 @@ in
       }
       ''
         mkdir -p $out
-        # the one partition with a hash tree is the store's. systemd-repart writes the
-        # architecture's own name for its type, usr-x86-64-verity, and not the short usr-verity the
-        # partition is configured with, so the hash is found by being a hash and not by a name
+        # the store and its hash tree are a verity pair, and systemd-repart writes the same root
+        # hash on both halves, so the hash is the one value they agree on. matching on the type
+        # would not do: nix/image/default.nix configures it as usr-verity and repart writes the
+        # architecture's own name, usr-x86-64-verity
         usrhash=$(jq -r -e '
-          map(select(.roothash != null))
-          | if length == 1 then .[0].roothash
-            else error("expected one partition with a hash tree, found \(length)") end
+          map(select(.roothash != null) | .roothash) | unique
+          | if length == 1 then .[0]
+            else error("expected one root hash in the image, found \(length)") end
         ' ${config.system.build.intermediateImage}/repart-output.json)
 
         # a profile binary holds no kernel: only the sections that differ from the base, with
