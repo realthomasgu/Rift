@@ -33,6 +33,22 @@ off.</p>
 <p>The first boot of a new drive makes the encrypted volume and asks you to set its passphrase. Every
 boot after that asks for the passphrase and nothing else.</p>
 
+<h2>Ghost mode</h2>
+<p>Ghost mode is a second way to start the same drive. It leaves the encrypted volume locked, puts
+your home folder in memory and writes nothing to the drive at all. When you shut down, the drive is
+exactly as it was and the session is gone.</p>
+<p>Every boot starts with a menu of two lines, shown for three seconds:</p>
+<pre>Rift 0.1.0
+Rift 0.1.0 (Ghost mode)</pre>
+<p>Leave it alone and the first line starts, which is the ordinary boot. Press a key to stop the
+countdown, pick the second line with the arrow keys and press Enter for Ghost mode. It asks for no
+passphrase, because there is nothing to unlock. You get a working Rift with none of your files, none
+of your settings, no apps you installed and no AI models. Anything you make in it lives in memory
+until the machine is turned off.</p>
+<p>Use it to lend the computer to somebody, to open something you would rather leave no trace of, or
+to check that the drive still starts when you have forgotten what you changed. The exchange partition
+is not mounted in Ghost mode either, so nothing at all is written to the drive.</p>
+
 <h2>Starting without the passphrase on your own machine</h2>
 <p>On a machine that is yours, Rift can put a key for the volume in that machine's TPM, the small chip
 most computers made since about 2016 have for holding keys. The drive then starts on that machine with
