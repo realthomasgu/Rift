@@ -106,47 +106,50 @@ def main():
              os.path.abspath(args.passfile), "--drive", kept, "--exchange", "1G"] + base[1:]
     found = {}
     for name, words in [("an ordinary boot, to prove the drive", None)] + TRIES:
-        if words is None:
-            cmd = first
-        else:
-            cmd = [base[0], "--image", kept] + base[1:] + [
-                "-smbios", f"type=11,value=io.systemd.stub.kernel-cmdline-extra={words}"]
-        print(f"\n==== {name}\n==== {' '.join(cmd)}", flush=True)
-        child = pexpect.spawn(cmd[0], cmd[1:], encoding="utf-8", codec_errors="replace",
-                              dimensions=(40, 160))
-        child.logfile_read = Tee()
-        start = time.monotonic()
-        said = "nothing"
-        # the first boot writes the drive with rift-flash before qemu starts, which takes minutes
-        # and comes out of the same budget. a boot killed in the middle of that leaves a half
-        # written drive, and every boot after it on the same drive is answering the wrong question
-        seconds = args.write_seconds if words is None else args.seconds
-        try:
-            which = child.expect([PROMPT, PASSPHRASE, EMERGENCY, TIMEDOUT],
-                                 timeout=seconds)
-            if which == 1 and words is None:
-                # the ordinary boot asks for the passphrase, which is right
-                child.send(open(args.passfile).read() + "\r")
-                child.expect([PROMPT], timeout=seconds)
-                said = "a shell, after the passphrase"
+        # a boot that says nothing at all after the firmware hands over is the hang this vm has
+        # about once in five boots, and it is not an answer to anything. It is tried again, and the
+        # drive is written only the first time
+        for attempt in range(1, 4):
+            written = words is None and attempt == 1
+            if written:
+                cmd = first
             else:
-                said = ["a shell", "the passphrase prompt", "emergency mode",
-                        "a device that timed out"][which]
-        except pexpect.TIMEOUT:
-            said = f"nothing in {seconds} s"
-        except pexpect.EOF:
-            said = "qemu ended"
-        print(f"\n==== {name}: {said} after {time.monotonic() - start:.0f}s", flush=True)
-        found[name] = said
-        # a boot that got to a shell is shut down tidily so the drive is clean for the next one
-        if said.startswith("a shell"):
-            child.send("sudo systemctl poweroff\r")
+                cmd = [base[0], "--image", kept] + base[1:]
+                if words:
+                    cmd += ["-smbios",
+                            f"type=11,value=io.systemd.stub.kernel-cmdline-extra={words}"]
+            print(f"\n==== {name}, try {attempt}\n==== {' '.join(cmd)}", flush=True)
+            child = pexpect.spawn(cmd[0], cmd[1:], encoding="utf-8", codec_errors="replace",
+                                  dimensions=(40, 160))
+            child.logfile_read = Tee()
+            start = time.monotonic()
+            said = "nothing"
+            seconds = args.write_seconds if written else args.seconds
             try:
-                child.expect(pexpect.EOF, timeout=120)
+                which = child.expect([PROMPT, PASSPHRASE, EMERGENCY, TIMEDOUT], timeout=seconds)
+                if which == 1 and words is None:
+                    child.send(open(args.passfile).read() + "\r")
+                    child.expect([PROMPT], timeout=args.seconds)
+                    said = "a shell, after the passphrase"
+                else:
+                    said = ["a shell", "the passphrase prompt", "emergency mode",
+                            "a device that timed out"][which]
             except pexpect.TIMEOUT:
-                pass
-        child.terminate(force=True)
-        time.sleep(2)
+                said = f"nothing in {seconds} s"
+            except pexpect.EOF:
+                said = "qemu ended"
+            print(f"\n==== {name}: {said} after {time.monotonic() - start:.0f}s", flush=True)
+            if said.startswith("a shell"):
+                child.send("sudo systemctl poweroff\r")
+                try:
+                    child.expect(pexpect.EOF, timeout=120)
+                except pexpect.TIMEOUT:
+                    pass
+            child.terminate(force=True)
+            time.sleep(2)
+            if not said.startswith("nothing"):
+                break
+        found[name] = said
 
     print("\n==== how far each one got ====")
     for name, said in found.items():
