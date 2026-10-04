@@ -1,13 +1,18 @@
 //! `rift doctor`: one row per check with the numbers it read, then a count. It exits with 1
 //! when a check failed. A warning is a number worth a look, not a fault, and leaves the exit code
 //! alone.
+//!
+//! In Ghost mode it says so first, above the rows, because the mode is the reason for most of what
+//! is under it: persist is locked on purpose, so a row that would be a fault on an ordinary boot is
+//! the mode working. This is the one place that says a component is not there and why, so it is the
+//! one place that has to know the difference.
 
 use std::fmt::Write as _;
 use std::fs;
 use std::process::{Command, ExitCode};
 
 use librift::quasar::{self, Status};
-use librift::{orbit, paths};
+use librift::{ghost, orbit, paths};
 
 use crate::text;
 
@@ -71,13 +76,14 @@ pub fn run(args: &[String]) -> ExitCode {
         Some(other) => return text::unknown("doctor", other, USAGE),
     }
     let mountinfo = read("/proc/self/mountinfo");
+    let ghost = ghost::on();
     let checks = [
         Check::new("Orbit", orbit_verdict()),
         Check::new(
             "Quasar",
             quasar::status().map_or_else(
                 |why| (Verdict::Failed, why),
-                |status| quasar_verdict(&status),
+                |status| quasar_verdict(&status, ghost),
             ),
         ),
         Check::new(
@@ -85,6 +91,7 @@ pub fn run(args: &[String]) -> ExitCode {
             persist_verdict(
                 mount(&mountinfo, paths::PERSIST).as_ref(),
                 space(paths::PERSIST),
+                ghost,
             ),
         ),
         Check::new(
@@ -104,7 +111,7 @@ pub fn run(args: &[String]) -> ExitCode {
         ),
         Check::new("System image", image_verdict(&mountinfo)),
     ];
-    print!("{}", report(&checks));
+    print!("{}", report(&checks, ghost));
     if checks.iter().any(|check| check.verdict == Verdict::Failed) {
         ExitCode::FAILURE
     } else {
@@ -117,13 +124,17 @@ fn read(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
 
-fn report(checks: &[Check]) -> String {
+fn report(checks: &[Check], ghost: bool) -> String {
+    let mut out = String::new();
+    // the mode first, because it is the reason for the rows that would otherwise read as faults
+    if ghost {
+        let _ = writeln!(out, "{}. {}\n", ghost::NAME, ghost::SENTENCE);
+    }
     let width = checks
         .iter()
         .map(|check| check.name.chars().count() + 2)
         .max()
         .unwrap_or(0);
-    let mut out = String::new();
     for check in checks {
         let _ = writeln!(
             out,
@@ -161,7 +172,7 @@ fn orbit_verdict() -> (Verdict, String) {
     }
 }
 
-fn quasar_verdict(status: &Status) -> (Verdict, String) {
+fn quasar_verdict(status: &Status, ghost: bool) -> (Verdict, String) {
     let model = if status.tier.is_empty() {
         status.model.clone()
     } else {
@@ -177,6 +188,12 @@ fn quasar_verdict(status: &Status) -> (Verdict, String) {
     match status.state.as_str() {
         "ready" => (Verdict::Passed, format!("Ready, {model}")),
         "loading" => (Verdict::Warning, format!("Loading {model}")),
+        // a Ghost boot has no models directory off the drive, so there is nothing to load and
+        // nothing to look at: that is the mode, not a number worth a warning
+        "none" if ghost => (
+            Verdict::Passed,
+            format!("{}, the models on the drive are not mounted", ghost::NAME),
+        ),
         "none" => (Verdict::Warning, error("No chat model is on the drive")),
         "failed" => (Verdict::Failed, error("The model stopped")),
         other => (
@@ -223,8 +240,22 @@ fn space(path: &str) -> Option<(u64, u64)> {
     ))
 }
 
-fn persist_verdict(mount: Option<&Mount>, space: Option<(u64, u64)>) -> (Verdict, String) {
+fn persist_verdict(
+    mount: Option<&Mount>,
+    space: Option<(u64, u64)>,
+    ghost: bool,
+) -> (Verdict, String) {
     let Some(mount) = mount else {
+        // in Ghost mode nothing is mounted there on purpose, and the drive is left alone
+        if ghost {
+            return (
+                Verdict::Passed,
+                format!(
+                    "{}, persist is locked and nothing of it is mounted",
+                    ghost::NAME
+                ),
+            );
+        }
         return (
             Verdict::Failed,
             format!("Nothing is mounted at {}", paths::PERSIST),
@@ -467,7 +498,7 @@ Buffers:            2040 kB
     fn persist_says_how_much_is_free() {
         let gib = 1 << 30;
         assert_eq!(
-            persist_verdict(Some(&persist()), Some((1_288_490_189, 2 * gib))),
+            persist_verdict(Some(&persist()), Some((1_288_490_189, 2 * gib)), false),
             (
                 Verdict::Passed,
                 "/persist on /dev/mapper/persist (btrfs), 1.2 GiB free of 2.0 GiB, 60 percent"
@@ -475,16 +506,19 @@ Buffers:            2040 kB
             )
         );
         assert_eq!(
-            persist_verdict(Some(&persist()), Some((gib / 8, 2 * gib))).0,
+            persist_verdict(Some(&persist()), Some((gib / 8, 2 * gib)), false).0,
             Verdict::Warning
         );
         assert_eq!(
-            persist_verdict(Some(&persist()), Some((gib / 64, 2 * gib))).0,
+            persist_verdict(Some(&persist()), Some((gib / 64, 2 * gib)), false).0,
             Verdict::Failed
         );
-        assert_eq!(persist_verdict(Some(&persist()), None).0, Verdict::Failed);
         assert_eq!(
-            persist_verdict(None, Some((gib, gib))),
+            persist_verdict(Some(&persist()), None, false).0,
+            Verdict::Failed
+        );
+        assert_eq!(
+            persist_verdict(None, Some((gib, gib)), false),
             (
                 Verdict::Failed,
                 "Nothing is mounted at /persist".to_string()
@@ -587,25 +621,90 @@ Buffers:            2040 kB
             ..Status::default()
         };
         assert_eq!(
-            quasar_verdict(&status("ready", "")),
+            quasar_verdict(&status("ready", ""), false),
             (
                 Verdict::Passed,
                 "Ready, qwen3-0.6b-q8_0 for tier small".to_string()
             )
         );
-        assert_eq!(quasar_verdict(&status("loading", "")).0, Verdict::Warning);
         assert_eq!(
-            quasar_verdict(&status(
-                "none",
-                "No chat model that fits this machine is on the drive."
-            )),
+            quasar_verdict(&status("loading", ""), false).0,
+            Verdict::Warning
+        );
+        assert_eq!(
+            quasar_verdict(
+                &status(
+                    "none",
+                    "No chat model that fits this machine is on the drive."
+                ),
+                false
+            ),
             (
                 Verdict::Warning,
                 "No chat model that fits this machine is on the drive.".to_string()
             )
         );
-        assert_eq!(quasar_verdict(&status("failed", "")).0, Verdict::Failed);
-        assert_eq!(quasar_verdict(&status("asleep", "")).0, Verdict::Failed);
+        assert_eq!(
+            quasar_verdict(&status("failed", ""), false).0,
+            Verdict::Failed
+        );
+        assert_eq!(
+            quasar_verdict(&status("asleep", ""), false).0,
+            Verdict::Failed
+        );
+    }
+
+    #[test]
+    fn a_ghost_boot_says_the_mode_and_passes_what_the_mode_explains() {
+        let gib = 1 << 30;
+        // persist is not mounted on purpose, so the row is the mode working and not a fault
+        assert_eq!(
+            persist_verdict(None, Some((gib, gib)), true),
+            (
+                Verdict::Passed,
+                "Ghost mode, persist is locked and nothing of it is mounted".to_string()
+            )
+        );
+        // and a mounted persist still reads the same way, whatever the command line says
+        assert_eq!(
+            persist_verdict(Some(&persist()), Some((gib, 2 * gib)), true).0,
+            Verdict::Passed
+        );
+        let none = Status {
+            state: "none".into(),
+            model: String::new(),
+            tier: "small".into(),
+            error: "No chat model that fits this machine is on the drive.".into(),
+            ..Status::default()
+        };
+        assert_eq!(
+            quasar_verdict(&none, true),
+            (
+                Verdict::Passed,
+                "Ghost mode, the models on the drive are not mounted".to_string()
+            )
+        );
+        // a model that stopped is still a fault in Ghost mode
+        assert_eq!(
+            quasar_verdict(
+                &Status {
+                    state: "failed".into(),
+                    ..none.clone()
+                },
+                true
+            )
+            .0,
+            Verdict::Failed
+        );
+        let checks = [Check::new("Persist", persist_verdict(None, None, true))];
+        let said = report(&checks, true);
+        assert!(
+            said.starts_with("Ghost mode. The drive stays locked and this session is in memory."),
+            "{said}"
+        );
+        assert!(said.contains("\n\nPersist  Passed"), "{said}");
+        // and nothing of the mode is in an ordinary report
+        assert!(!report(&checks, false).contains("stays locked"));
     }
 
     #[test]
@@ -631,7 +730,7 @@ Buffers:            2040 kB
             ),
         ];
         assert_eq!(
-            report(&checks),
+            report(&checks, false),
             "Orbit         Passed   On the bus, host 5297c0f65d6a, class borrowed, AI tier small\n\
              Quasar        Warning  Loading qwen3-0.6b-q8_0 for tier small\n\
              System image  Failed   Nothing is mounted at /usr\n\
