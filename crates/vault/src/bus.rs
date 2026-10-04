@@ -81,6 +81,10 @@ const UNLOCKING: &str = "What opens the drive cannot be read";
 const SET_UNLOCKING: &str = "What opens the drive cannot be changed";
 const REMOVE_KEY: &str = "A security key cannot be taken off the drive";
 
+/// What the owner and root alone may do, which finishes the sentence anyone else is refused with.
+const THE_OWNER: &str = "see or change the owner's name and password";
+const THE_EXCHANGE: &str = "mount the drive's exchange partition";
+
 #[zbus::interface(name = "dev.rift.Vault")]
 impl Vault {
     /// Every snapshot of home, oldest first.
@@ -253,7 +257,7 @@ impl Vault {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<bool> {
-        owner_or_root(&header, connection, &self.owner).await?;
+        owner_or_root(&header, connection, &self.owner, THE_EXCHANGE).await?;
         let exchange = Arc::clone(&self.exchange);
         blocking::unblock(move || exchange.there())
             .await
@@ -272,7 +276,7 @@ impl Vault {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<String> {
-        owner_or_root(&header, connection, &self.owner).await?;
+        owner_or_root(&header, connection, &self.owner, THE_EXCHANGE).await?;
         let exchange = Arc::clone(&self.exchange);
         blocking::unblock(move || {
             if !exchange.there()? {
@@ -292,7 +296,7 @@ impl Vault {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<(String, String, bool)> {
-        owner_or_root(&header, connection, &self.owner).await?;
+        owner_or_root(&header, connection, &self.owner, THE_OWNER).await?;
         let owner = Arc::clone(&self.owner);
         blocking::unblock(move || {
             let account = owner.account()?;
@@ -312,7 +316,7 @@ impl Vault {
         if librift::ghost::on() {
             return Err(in_ghost_mode(OWNER_NAME));
         }
-        let uid = owner_or_root(&header, connection, &self.owner).await?;
+        let uid = owner_or_root(&header, connection, &self.owner, THE_OWNER).await?;
         let owner = Arc::clone(&self.owner);
         let chosen = name.trim().to_string();
         blocking::unblock(move || owner.keep_name(&name).map(|()| owner::apply_now()))
@@ -335,7 +339,7 @@ impl Vault {
         if librift::ghost::on() {
             return Err(in_ghost_mode(OWNER_PASSWORD));
         }
-        let uid = owner_or_root(&header, connection, &self.owner).await?;
+        let uid = owner_or_root(&header, connection, &self.owner, THE_OWNER).await?;
         let owner = Arc::clone(&self.owner);
         let done = blocking::unblock(move || {
             owner
@@ -384,7 +388,7 @@ impl Vault {
         if librift::ghost::on() {
             return Err(in_ghost_mode(UNLOCKING));
         }
-        owner_or_root(&header, connection, &self.owner).await?;
+        owner_or_root(&header, connection, &self.owner, THE_OWNER).await?;
         let fingerprint = this_machine().await?;
         let sealed = Arc::clone(&self.sealed);
         blocking::unblock(move || {
@@ -412,7 +416,7 @@ impl Vault {
         if librift::ghost::on() {
             return Err(in_ghost_mode(SET_UNLOCKING));
         }
-        let uid = owner_or_root(&header, connection, &self.owner).await?;
+        let uid = owner_or_root(&header, connection, &self.owner, THE_OWNER).await?;
         let sealed = Arc::clone(&self.sealed);
         if !on {
             blocking::unblock(move || sealed.turn_off())
@@ -451,7 +455,7 @@ impl Vault {
         if librift::ghost::on() {
             return Err(in_ghost_mode(UNLOCKING));
         }
-        owner_or_root(&header, connection, &self.owner).await?;
+        owner_or_root(&header, connection, &self.owner, THE_OWNER).await?;
         let keys = Arc::clone(&self.keys);
         blocking::unblock(move || keys.list())
             .await
@@ -474,7 +478,7 @@ impl Vault {
         if librift::ghost::on() {
             return Err(in_ghost_mode(REMOVE_KEY));
         }
-        let uid = owner_or_root(&header, connection, &self.owner).await?;
+        let uid = owner_or_root(&header, connection, &self.owner, THE_OWNER).await?;
         let keys = Arc::clone(&self.keys);
         blocking::unblock(move || keys.remove(slot))
             .await
@@ -535,12 +539,15 @@ async fn caller(header: &Header<'_>, connection: &zbus::Connection) -> fdo::Resu
     Ok(Account { uid, gid })
 }
 
-/// The owner and root may read and change the owner's name and password, and no one else: not
-/// Rift's own services, which run as accounts of their own. The uid of the sender, when it may.
+/// The owner and root may do `what`, and no one else: not Rift's own services, which run as
+/// accounts of their own. The uid of the sender, when it may. `what` finishes the sentence anyone
+/// else is refused with, so it reads as what was asked for: "see or change the owner's name and
+/// password".
 async fn owner_or_root(
     header: &Header<'_>,
     connection: &zbus::Connection,
     owner: &Owner,
+    what: &str,
 ) -> fdo::Result<u32> {
     let sender = header
         .sender()
@@ -553,9 +560,9 @@ async fn owner_or_root(
     if uid == 0 || owner.account().is_ok_and(|account| account.uid == uid) {
         return Ok(uid);
     }
-    Err(fdo::Error::AccessDenied(
-        "Only the owner and root may see or change the owner's name and password.".into(),
-    ))
+    Err(fdo::Error::AccessDenied(format!(
+        "Only the owner and root may {what}."
+    )))
 }
 
 /// The error a change to the owner was refused with, of the kind that says why.
@@ -658,5 +665,23 @@ mod tests {
             assert!(!what.ends_with('.'), "{what}");
             assert!(!what.contains('/'), "{what}");
         }
+    }
+
+    #[test]
+    fn what_only_the_owner_may_do_finishes_the_sentence() {
+        for what in [THE_OWNER, THE_EXCHANGE] {
+            let said = format!("Only the owner and root may {what}.");
+            assert!(said.is_ascii(), "{said}");
+            assert!(!what.ends_with('.'), "{what}");
+            // a verb, so the sentence reads as one thing: not a noun and not a capital
+            assert!(
+                what.starts_with(|first: char| first.is_ascii_lowercase()),
+                "{what}"
+            );
+        }
+        assert_eq!(
+            format!("Only the owner and root may {THE_EXCHANGE}."),
+            "Only the owner and root may mount the drive's exchange partition."
+        );
     }
 }

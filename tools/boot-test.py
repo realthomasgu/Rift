@@ -2529,15 +2529,23 @@ def main():
                 fail(f"{folder} is mounted on the ghost boot: {without_console(output).strip()!r}")
         ok("persist, the exchange partition and the esp are all unmounted on the ghost boot")
 
+        def unit_state(unit):
+            """What systemd says this unit is. The word has to be read on a line of its own:
+            `inactive` has `active` inside it, so a substring reads one for the other."""
+            _, output = run(f"systemctl show -p ActiveState --value {unit} | cat",
+                            f"what {unit} is")
+            found = re.search(r"^(in)?active$|^(de)?activating$|^failed$|^reloading$",
+                              without_console(output), re.M)
+            return found.group(0) if found else None
+
         # and neither unit that mounts the exchange partition has run. The one every other boot
         # runs is held out by its own condition; the one the owner's press starts is wanted by
         # nothing, so it runs when it is started and at no other time (ADR-0085)
         for unit in EXCHANGE_UNITS:
-            _, output = run(f"systemctl is-active {unit} | cat", f"whether {unit} ran")
-            said = without_console(output)
-            if "inactive" not in said:
-                fail(f"{unit} is {said.strip()[-200:]!r} on the ghost boot, where nothing may have "
-                     "mounted the exchange partition")
+            was = unit_state(unit)
+            if was != "inactive":
+                fail(f"{unit} is {was!r} on the ghost boot, where nothing may have mounted the "
+                     "exchange partition")
         ok(f"neither {EXCHANGE_UNITS[0]} nor {EXCHANGE_UNITS[1]} has run on the ghost boot")
 
         # a machine id of its own and a journal that is only in memory
@@ -2831,13 +2839,14 @@ def main():
         if "exfat" not in without_console(output):
             fail(f"{DRIVE_EXCHANGE} is not the drive's exfat partition after the press: "
                  f"{without_console(output).strip()!r}")
-        _, output = run(f"systemctl is-active {EXCHANGE_UNITS[1]} | cat",
-                        f"whether {EXCHANGE_UNITS[1]} ran for the press")
-        if "active" not in without_console(output):
-            fail(f"{EXCHANGE_UNITS[1]} did not run for the press: "
-                 f"{without_console(output).strip()[-200:]!r}")
+        if unit_state(EXCHANGE_UNITS[1]) != "active":
+            fail(f"{EXCHANGE_UNITS[1]} is {unit_state(EXCHANGE_UNITS[1])!r} after the press, so "
+                 "something other than the unit Vault starts made the mount")
+        if unit_state(EXCHANGE_UNITS[0]) != "inactive":
+            fail(f"{EXCHANGE_UNITS[0]} is {unit_state(EXCHANGE_UNITS[0])!r} on a ghost boot, where "
+                 "its own condition keeps it out whoever starts it")
         ok(f"a press mounted the drive's exchange partition at {DRIVE_EXCHANGE} through "
-           f"{EXCHANGE_UNITS[1]}, and the window is there")
+           f"{EXCHANGE_UNITS[1]}, and the boot's own unit still has not run")
 
         # a file onto it, which is the whole point of the partition: it is the one thing a ghost
         # session can leave on the drive, and it is there because the owner put it there
