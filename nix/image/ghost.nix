@@ -146,6 +146,10 @@ in
         RemainAfterExit = true;
         ExecStart = [
           "/bin/mkdir -p /sysroot/home /sysroot/persist /sysroot/var/lib/rift/hosts /sysroot/var/lib/rift/models /sysroot/var/lib/flatpak"
+          # /etc/machine-id is a link to a file on persist, and a link to nothing is not a machine
+          # id. An empty file is how systemd is told to make one, so a ghost boot gets an id of its
+          # own that lasts as long as the session and tells nobody which drive this is
+          "/bin/touch /sysroot/var/lib/rift/machine-id"
         ];
       };
     };

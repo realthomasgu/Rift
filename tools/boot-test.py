@@ -2490,10 +2490,10 @@ def main():
         ghost_machine = one_line("cat /etc/machine-id", "the machine id of the ghost boot", machine_id)
         if ghost_machine == machine:
             fail(f"the ghost boot has the drive's own machine id {machine}")
-        status, _ = run("test -d /var/log/journal", "whether the journal is kept on the ghost boot")
-        if status == 0:
-            fail("the ghost boot has a journal directory on disk")
-        ok(f"the ghost boot has the machine id {ghost_machine} and a journal only in memory")
+        _, output = run("stat -f -c fs=%T /var", "what var is on the ghost boot")
+        if "fs=tmpfs" not in without_console(output):
+            fail(f"var is not a tmpfs on the ghost boot: {without_console(output).strip()!r}")
+        ok(f"the ghost boot has the machine id {ghost_machine}, and var is in memory with it")
 
         # a file written in it, to prove it is gone at the next boot
         status, output = run(f"echo '{ghost_words}' > {GHOST_LETTER}", "a file in the ghost session's home")
