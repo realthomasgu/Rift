@@ -47,8 +47,19 @@ of your settings, no apps you installed and no AI models. Anything you make in i
 until the machine is turned off.</p>
 <p>Use it to lend the computer to somebody, to open something you would rather leave no trace of, or
 to check that the drive still starts when you have forgotten what you changed. The exchange partition
-is not mounted in Ghost mode either, so nothing at all is written to the drive. It is still there as a
-disk in Files, and you can mount it yourself if you want to copy something onto it.</p>
+is not mounted in Ghost mode either, because mounting it writes to it, and a Ghost session has no way
+to mount it by hand yet. To hand a file to another computer from a Ghost session, use a second USB
+stick.</p>
+<p>What a Ghost session cannot do, it says. Anything that reads or writes the drive answers with one
+sentence naming the mode, rather than failing on a missing file or saying there is nothing there.
+That is <code>rift ai</code>, which has no models to run; <code>rift snapshot</code> and
+<code>rift backup</code>; <code>rift host auto-unlock</code>, <code>rift host keys</code>,
+<code>sudo rift host enroll-key</code> and <code>sudo rift clone</code>, which all need the drive's
+passphrase; and in Settings the Owner page, Backups, Updates, the models on the AI page and the boot
+style on the Appearance page. Each of those says the mode in the place the row would be. What you set
+in a Ghost session that does work, such as the wallpaper, an app you install or which app opens a kind
+of file, holds until the machine is turned off and is on no drive afterwards, and the foot of the
+Settings sidebar says so on every page.</p>
 <p>A Ghost session says which mode it is in. The right end of the top bar reads <strong>Ghost
 mode</strong> for as long as you are logged in, and a notification at the login says what that means;
 it stays on screen until you close it. <code>rift doctor</code> says it over its rows, and the rows it
