@@ -467,6 +467,11 @@ WELCOME_APP_ID = "dev.rift.Welcome"
 # carries and the whole sentence the notification at the login and rift doctor both print
 GHOST_NAME = "Ghost mode"
 GHOST_SENTENCE = "The drive stays locked and this session is in memory. Nothing you save is kept."
+# the tail of every refusal, from ghost::cannot, and of what holds for the session alone, from
+# ghost::not_kept. The sentence in front of each one says what cannot be done, or what can
+GHOST_REFUSAL = "in Ghost mode: persist stays locked and nothing is written to the drive."
+GHOST_FOR_NOW = ("In Ghost mode nothing is kept: everything here is in memory "
+                 "until the machine goes off.")
 WELCOME_NOTE = "~/.local/state/rift/welcomed"
 WELCOME_SIZE = (880, 640)
 WELCOME_HEADER = (48, 48, 48)
@@ -2553,6 +2558,89 @@ def main():
             except (OSError, RuntimeError) as why:
                 fail(f"the picture {args.ghost_desktop} could not be taken: {why}")
 
+
+        # every command that writes to the drive says the mode and does nothing, rather than failing
+        # on a path that is not there or saying something untrue (ADR-0084). Each one is run as the
+        # owner, in the ghost session's own shell
+        def refused(command, what, clause):
+            status, output = run(command, what)
+            printed = without_console(output)
+            if clause not in printed or GHOST_REFUSAL not in printed:
+                fail(f"{command} does not say the mode: {printed.strip()[-400:]!r}")
+            if status == 0:
+                fail(f"{command} exited 0 in a ghost boot, where it did not do what was asked")
+            return printed
+
+        refused("rift ai hello", "rift ai with a question on the ghost boot",
+                "No model can answer a question")
+        refused("rift ai index", "rift ai index on the ghost boot", "Search by meaning cannot run")
+        refused("rift ai search letter", "rift ai search on the ghost boot",
+                "Nothing can be searched by meaning")
+        refused("rift ai say hello", "rift ai say on the ghost boot", "Words cannot be said out loud")
+        refused("rift snapshot list", "rift snapshot list on the ghost boot",
+                "Timeline snapshots cannot be reached")
+        refused("rift snapshot take", "rift snapshot take on the ghost boot",
+                "A snapshot cannot be taken")
+        refused("rift backup list", "rift backup list on the ghost boot",
+                "Backups cannot be reached")
+        refused("rift host auto-unlock", "rift host auto-unlock on the ghost boot",
+                "What opens the drive cannot be read")
+        refused("rift host keys", "rift host keys on the ghost boot",
+                "What opens the drive cannot be read")
+        refused("sudo rift clone /dev/no-such-disk", "sudo rift clone on the ghost boot",
+                "This drive cannot be cloned")
+        ok("rift ai, rift snapshot, rift backup, rift host and rift clone all say the mode and "
+           "exit non-zero on the ghost boot")
+
+        # the Owner page, which is where the most of it is said: the name, the password, the session
+        # and what opens the drive are all the drive's, and each row says the mode in its place
+        run("systemd-run --user --quiet --collect rift-settings --page owner", "Settings on the Owner page")
+
+        def ghost_settings(what):
+            status, output = run("rift-settings --state", what)
+            if status != 0:
+                return {}
+            state = {}
+            for printed_line in without_console(output).splitlines():
+                key, _, value = printed_line.strip().partition(" ")
+                if key in SETTINGS_KEYS:
+                    state[key] = value.strip()
+            return state
+
+        shown = waiting(180, lambda: ghost_settings("what Settings says in a ghost session") or None) or {}
+        if shown.get("page") != "owner":
+            fail(f"Settings in a ghost session is on page {shown.get('page')!r}, not owner")
+        # nothing of the owner is read there, so the page prints none of Vault's words
+        for word in ("owner-user", "owner-password", "unlocking-auto", "unlocking-keys"):
+            if word in shown:
+                fail(f"Settings read {word} {shown[word]!r} off a locked persist in a ghost session")
+        if args.ghost_desktop:
+            stem, extension = os.path.splitext(args.ghost_desktop)
+            # the window is drawn a moment after its state answers: `page owner` is iced having made
+            # the window, not the wayland surface having drawn
+            time.sleep(3)
+            try:
+                width, height, rgb = screendump(ghost_qmp, work, "ghost-settings")
+                write_png(f"{stem}-settings{extension}", width, height, rgb)
+                print(f"\nboot-test: wrote {stem}-settings{extension}, {width}x{height}", flush=True)
+            except (OSError, RuntimeError) as why:
+                fail(f"the picture of Settings could not be taken: {why}")
+        ok("Settings' Owner page asks Vault for nothing in a ghost session")
+
+        # and the two that do work and are not kept say so. The session journal is real, and the
+        # window Settings just opened is in it, so rift session has a row to print under; a setting
+        # Orbit writes is this login's own
+        status, output = run("rift session", "rift session on the ghost boot")
+        printed = without_console(output)
+        if status != 0 or "These do not come back." not in printed or GHOST_FOR_NOW not in printed:
+            fail(f"rift session does not say the windows are not kept: {printed.strip()[-400:]!r}")
+        status, output = run("rift host set class owned", "rift host set on the ghost boot")
+        printed = without_console(output)
+        if status != 0 or "It is set for this session." not in printed or GHOST_FOR_NOW not in printed:
+            fail(f"rift host set does not say the setting is not kept: {printed.strip()[-400:]!r}")
+        ok("rift session says the windows do not come back and rift host set says the setting is "
+           "this session's own")
+
         # rift doctor says the mode over its rows, and the rows the mode explains pass, so a boot
         # that is working exits 0. Orbit, Quasar, Vault and Airlock are all on the bus in a ghost
         # boot: each one finds its directory empty, which is what the initrd makes them
@@ -2598,6 +2686,9 @@ def main():
                  f"{welcome.get('page')!r}")
         if args.ghost_desktop:
             stem, extension = os.path.splitext(args.ghost_desktop)
+            # `window open` is iced having made the window, not the wayland surface having drawn:
+            # without this the picture came out byte for byte the desktop one
+            time.sleep(3)
             try:
                 width, height, rgb = screendump(ghost_qmp, work, "ghost-welcome")
                 write_png(f"{stem}-welcome{extension}", width, height, rgb)
