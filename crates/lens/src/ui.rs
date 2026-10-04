@@ -114,6 +114,10 @@ const JOIN_WAIT: Duration = Duration::from_secs(45);
 /// The icon of the notification about the windows that did not come back.
 const PASSED_OVER: &str = "focus-windows-symbolic";
 
+/// The icon of the notification a Ghost login puts up. The drive is locked, which is what the
+/// session is, and it is the one the Owner page uses for the same thing.
+const GHOST_ICON: &str = "channel-secure-symbolic";
+
 /// How long after what is open changed the journal of it is written. A session being taken down
 /// closes its windows and stops the shell in the same breath, so a shell that is already gone writes
 /// no journal of an empty desktop over the one the next login brings back. It also holds the file
@@ -787,6 +791,28 @@ fn boot(chosen: appearance::Theme, apps: Vec<App>) -> (Lens, Task<Message>) {
     (state, opening)
 }
 
+/// What a Ghost login says, once, when the bar it says it in is on screen: the name of the mode over
+/// the sentence that says what it means. The two words in the bar name the mode and do not say what
+/// it is, and the person who most needs the sentence is the one who has not met the mode before.
+///
+/// It is critical, which in this shell is the only urgency that stays on screen until it is closed
+/// and the only one Do not disturb does not hide: what a session is cannot be a banner that went by
+/// while somebody was looking elsewhere. It draws like every other notification.
+fn ghost_notice() -> Task<Message> {
+    Task::done(Message::Notified(Notification {
+        id: u32::MAX - 2,
+        app: "Lens".to_string(),
+        icon: Some(GHOST_ICON.to_string()),
+        entry: None,
+        summary: librift::ghost::NAME.to_string(),
+        body: librift::ghost::SENTENCE.to_string(),
+        actions: Vec::new(),
+        default: false,
+        urgency: notice::Urgency::Critical,
+        transient: false,
+    }))
+}
+
 fn subscription(_: &Lens) -> Subscription<Message> {
     Subscription::batch([
         keys(),
@@ -1063,11 +1089,20 @@ fn surface(state: &mut Lens, message: &Message) -> Task<Message> {
         // settings and names it when it maps, which is before anything can open a menu. its id is
         // what a new interface text size is sent to
         Message::Opened(id, width) => {
-            if state.bar.is_none() && id != state.dock.id {
+            let bar = state.bar.is_none() && id != state.dock.id;
+            if bar {
                 state.bar = Some(id);
             }
             measured(state, id, width);
-            focused(state, id, true)
+            let next = focused(state, id, true);
+            // the mode is said once the bar that carries it is up, and not in boot(): the bar is the
+            // one surface the shell does not open, so a surface opened before it maps would be taken
+            // for the bar by the line above
+            if bar && librift::ghost::on() {
+                Task::batch([next, ghost_notice()])
+            } else {
+                next
+            }
         }
         Message::Sized(id, width) => {
             measured(state, id, width);
@@ -2395,6 +2430,7 @@ fn remember(state: &Lens) {
     };
     let status = &state.status;
     line("clock", &state.clock);
+    line("ghost", if librift::ghost::on() { "on" } else { "off" });
     line("theme", state.theme.word());
     line("accent", state.accent.word());
     line("text", &SCALE.load(Ordering::Relaxed).to_string());
@@ -2752,9 +2788,12 @@ fn view(state: &Lens, id: window::Id) -> Element<'_, Message> {
             clock: state.datemenu.is_some(),
             system: state.system.is_some(),
         },
-        state.notices.quiet,
-        state.recording.is_some(),
-        state.layout.as_deref(),
+        bar::Marks {
+            quiet: state.notices.quiet,
+            recording: state.recording.is_some(),
+            layout: state.layout.as_deref(),
+            ghost: librift::ghost::on(),
+        },
     ))
     .width(Length::Fill)
     .height(Length::Fill)

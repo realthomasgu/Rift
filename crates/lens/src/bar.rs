@@ -1,8 +1,9 @@
 //! The top bar, laid out like Tails: the Applications button at the left, the clock in the middle
 //! of the screen, which opens the clock menu, and the status icons at the right, which are one
 //! button that opens the system menu. With two keyboard layouts or more, the one in use stands
-//! before the status icons by its short name, the way GNOME shows its input source. The sizes and
-//! the colours below are the ones the boot test counts.
+//! before the status icons by its short name, the way GNOME shows its input source. In Ghost mode
+//! the name of the mode stands before both, for the whole session. The sizes and the colours below
+//! are the ones the boot test counts.
 
 use iced::widget::{button, column, container, row, space, stack, text};
 use iced::{Background, Border, Color, Element, Length, Shadow, Theme};
@@ -49,33 +50,48 @@ pub struct Open {
     pub system: bool,
 }
 
+/// What the bar says besides the clock and the status icons.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Marks<'a> {
+    /// Do not disturb is on, which puts its icon at the left of the clock.
+    pub quiet: bool,
+    /// The screen is being recorded, which makes that mark the first status icon.
+    pub recording: bool,
+    /// The short name of the keyboard layout in use, when there are two or more.
+    pub layout: Option<&'a str>,
+    /// This boot is a Ghost one, which the bar says for the whole session.
+    pub ghost: bool,
+}
+
 /// The bar. With Do not disturb on, its icon is at the left of the clock; while the screen is
 /// being recorded, the mark for that is the first of the status icons; while there are two
-/// keyboard layouts or more, the short name of the one in use is before the status icons.
+/// keyboard layouts or more, the short name of the one in use is before the status icons; in Ghost
+/// mode the name of the mode is before them all.
 pub fn view<'a>(
     look: Palette,
     clock: &'a str,
     status: &Status,
     open: Open,
-    quiet: bool,
-    recording: bool,
-    layout: Option<&'a str>,
+    marks: Marks<'a>,
 ) -> Element<'a, Message> {
     let mut right = row![].spacing(BUTTON_GAP).align_y(iced::Center);
-    if let Some(name) = layout {
+    if marks.ghost {
+        right = right.push(mode(look));
+    }
+    if let Some(name) = marks.layout {
         right = right.push(layout_button(look, name));
     }
     let items = row![
         applications(look, open.applications),
         space().width(Length::Fill),
-        right.push(status_button(look, status, open.system, recording)),
+        right.push(status_button(look, status, open.system, marks.recording)),
     ]
     .align_y(iced::Center)
     .height(Length::Fill);
     // the clock sits in the middle of the screen, not of what is left over, so it is a layer of
     // its own under the buttons. the space between them takes no click, so a click there reaches
     // the clock
-    let middle = container(clock_button(look, clock, open.clock, quiet)).center(Length::Fill);
+    let middle = container(clock_button(look, clock, open.clock, marks.quiet)).center(Length::Fill);
     let content = container(stack![middle, items])
         .width(Length::Fill)
         .height(TALL - LINE)
@@ -121,6 +137,17 @@ fn clock_button(look: Palette, clock: &str, open: bool, quiet: bool) -> Element<
         .padding([0, PAD])
         .on_press(Message::ToggleClock)
         .style(move |_: &Theme, state| fill(look, open, state))
+        .into()
+}
+
+/// The name of the mode this session is in, for the whole session. There is nothing to click: it
+/// is a statement about the boot, not a setting, and it goes where every desktop puts what the
+/// system is doing, at the left of the status icons. Ghost mode is the only one there is, and an
+/// ordinary boot shows nothing here.
+fn mode(look: Palette) -> Element<'static, Message> {
+    container(text(librift::ghost::NAME).size(TEXT_SIZE).color(look.text))
+        .center_y(Length::Fill)
+        .padding([0, PAD])
         .into()
 }
 
