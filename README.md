@@ -55,6 +55,7 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 - A machine the owner has declared their own can hold a key for the volume in its TPM, sealed to the firmware's record of the secure boot policy, so that machine starts the drive without the passphrase. One machine holds such a key at a time, `rift host auto-unlock` adds and removes it, and the passphrase continues to work on that machine and on every other.
 - A FIDO2 security key can unlock the volume in place of the passphrase, asking for the key's own PIN and a touch. A key belongs to the drive rather than to a machine, so it works on every machine, and any number of keys can be enrolled. `rift host keys` lists them, `sudo rift host enroll-key` adds the one that is plugged in and `rift host remove-key` takes one off. The passphrase continues to work with a key enrolled or without one.
 - Ghost mode is a second boot entry for the same drive that leaves the volume locked, holds the home directory in memory and writes nothing to the drive, so a session in it is gone when the machine is turned off and the drive is unchanged. It is the second line of the boot menu, which is shown for three seconds at every boot, and it asks for no passphrase.
+- A session in Ghost mode says so: the top bar carries the words for the whole session, a notification at the login says what the mode means and stays until it is closed, and `rift doctor` says the same over its rows. Rift Welcome does not open there, since nothing it sets would be kept.
 - Memory pressure is absorbed by compressed RAM (zram). No swap space exists on the drive or on the host.
 - An optional exFAT partition provides ordinary storage that Windows, macOS and other Linux systems can read without Rift.
 
@@ -132,7 +133,7 @@ The image includes the following software, so a new drive is usable without a ne
 
 Rift contains no telemetry, requires no account, and depends on no online service to boot or to operate.
 
-Ghost mode leaves the encrypted volume locked and keeps the whole session in memory, so a boot in it writes nothing to the drive and leaves nothing behind on the computer.
+Ghost mode leaves the encrypted volume locked and keeps the whole session in memory, so a boot in it writes nothing to the drive and leaves nothing behind on the computer. The session says which mode it is in, in the bar and in a notification at the login.
 
 ## Components
 
