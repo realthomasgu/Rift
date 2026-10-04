@@ -21,25 +21,6 @@ const ESP: &str = "esp";
 /// Where the ukis are on the esp, the folder systemd-boot reads its entries from.
 const LINUX: &str = "EFI/Linux";
 
-/// Whether the esp is mounted to be read or to be written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Read {
-    /// Read only, which writes nothing to the partition at all.
-    Only,
-    /// Read and write, for the one method that writes a word onto it.
-    AndWrite,
-}
-
-impl Read {
-    /// The mount options, which are none for a write and `ro` for a read.
-    const fn options(self) -> Option<&'static str> {
-        match self {
-            Self::Only => Some("ro"),
-            Self::AndWrite => None,
-        }
-    }
-}
-
 /// Where the esp is, and where it is mounted while Vault reads or writes it.
 pub struct Esp {
     /// Where udev names the running drive's partitions, `/dev/disk/by-designator`.
@@ -61,7 +42,7 @@ impl Esp {
     ///
     /// A sentence when the esp is not there or could not be mounted.
     pub fn style(&self) -> Result<Style, String> {
-        let esp = self.mount(Read::Only)?;
+        let esp = self.mount()?;
         let style = Style::read(esp.path());
         esp.unmount()?;
         Ok(style)
@@ -73,7 +54,7 @@ impl Esp {
     ///
     /// A sentence when the esp is not there, could not be mounted, or could not be written.
     pub fn set_style(&self, style: Style) -> Result<(), String> {
-        let esp = self.mount(Read::AndWrite)?;
+        let esp = self.mount()?;
         style.write(esp.path())?;
         esp.unmount()
     }
@@ -85,7 +66,7 @@ impl Esp {
     ///
     /// A sentence when the esp is not there, could not be mounted, or has no `EFI/Linux`.
     pub fn ukis(&self) -> Result<Vec<String>, String> {
-        let esp = self.mount(Read::Only)?;
+        let esp = self.mount()?;
         let read = std::fs::read_dir(esp.path().join(LINUX))
             .map(|entries| {
                 entries
@@ -100,11 +81,12 @@ impl Esp {
     /// Mounts the esp under the runtime directory. It is mounted at /boot as well, on an automount
     /// that comes and goes, and the same vfat mounted twice is one file system either way.
     ///
-    /// A read mounts it read only. A vfat mounted for writing is written as it is mounted, whether
-    /// anything writes to it or not, and the only thing here that has any business doing that is
-    /// the one method that writes a word (ADR-0084). The initrd's own reader mounts it read only
-    /// for the same reason.
-    fn mount(&self, read: Read) -> Result<Mounted, String> {
+    /// It is mounted for writing even to read, which is not a choice: the kernel refuses a second
+    /// mount of a block device whose read only state would differ from the first ("would change RO
+    /// state"), and /boot is up for two minutes after anything touches it. A vfat mounted for
+    /// writing is written as it is mounted, so in a Ghost boot the methods that would come here
+    /// refuse instead, which is how that mode mounts no part of the drive at all (ADR-0084).
+    fn mount(&self) -> Result<Mounted, String> {
         let device = self.designators.join(ESP);
         if !device.exists() {
             return Err("The drive this system started from has no boot partition.".into());
@@ -113,6 +95,6 @@ impl Esp {
         let path = self
             .run
             .join(format!("esp-{}-{number}", std::process::id()));
-        Mounted::new(&device, path, "vfat", read.options())
+        Mounted::new(&device, path, "vfat", None)
     }
 }
