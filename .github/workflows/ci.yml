@@ -558,7 +558,8 @@ jobs:
           rm -f clone.img updates.img stick.img locked.img backup.img
           df -h .
           python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --ghost ghoststate \
-            --exchange 1G --ghost-menu boot-menu.png --log ghost.log --timeout 1800
+            --exchange 1G --ghost-menu boot-menu.png --ghost-desktop desktop-ghost.png \
+            --log ghost.log --timeout 1800
           rm -rf ghoststate
       - name: Boot with a software tpm
         # a key for persist sealed to the machine's tpm, so an owned machine opens the drive with

@@ -75,9 +75,13 @@ boots the drive three times, keeping it in a file between them: ordinarily, with
 home; then the ghost entry, held out of systemd-boot's hidden menu with the space bar sent through
 the qemu monitor, where persist is not open, no unit for it was ever made, home is a tmpfs with
 nothing of the drive in it, the esp and the exchange partition are both unmounted and the machine id
-is one of its own; then ordinarily again, where the file written in the ghost session is gone and the
-one written before it is still there. The whole drive is hashed before the ghost boot and after it
-and the two have to match. --ghost-menu saves a picture of the menu with both entries in it.
+is one of its own. It also reads back what the session says it is: the shell's own state says the
+mode, the notification that says what the mode means is on screen, rift doctor says the same sentence
+over its rows and passes persist because the mode locks it, and Welcome did not open by itself but
+says it is a ghost session when it is started by hand. Then ordinarily again, where the file written
+in the ghost session is gone and the one written before it is still there. The whole drive is hashed
+before the ghost boot and after it and the two have to match. --ghost-menu saves a picture of the
+menu with both entries in it, --ghost-desktop one of the session with the mode in its bar.
 
 The drive: the vm app writes it from the image into a sparse file with rift-flash, with an exchange
 partition when --exchange gives its size. Persist has to be luks2 with argon2id, the settings a person
@@ -459,6 +463,10 @@ FLATPAK_APP = "Rift test app"
 # opens at, which horizon floats in the middle of the screen, and the grays of its header bar and its
 # page on dark, from crates/rift-ui/src/theme.rs
 WELCOME_APP_ID = "dev.rift.Welcome"
+# what a ghost session says about itself, from crates/librift/src/ghost.rs: the two words the bar
+# carries and the whole sentence the notification at the login and rift doctor both print
+GHOST_NAME = "Ghost mode"
+GHOST_SENTENCE = "The drive stays locked and this session is in memory. Nothing you save is kept."
 WELCOME_NOTE = "~/.local/state/rift/welcomed"
 WELCOME_SIZE = (880, 640)
 WELCOME_HEADER = (48, 48, 48)
@@ -519,7 +527,7 @@ STATE_KEYS = ("clock", "theme", "accent", "text", "apps", "network", "volume", "
               "notifications", "banners", "latest", "do-not-disturb", "clock-menu", "popup",
               "recording", "screen-reader", "keyboard", "layout", "dock-position", "dock-extend",
               "dock-icons", "dock-hide", "dock-hidden", "dock-places", "places", "listening", "said",
-              "restored", "passed")
+              "restored", "passed", "ghost")
 DATE_FORMAT = "+%a %-d %b %H:%M"
 CLOCK = re.compile(r"^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d\d:\d\d$", re.M)
 # what the field and the list ask lens to type, and how many rows the pipeline prints
@@ -1565,6 +1573,8 @@ def main():
                     "session in memory, and check that nothing of it reaches the drive. This directory holds the "
                     "drive the three boots share")
     ap.add_argument("--ghost-menu", help="save a picture of systemd-boot's menu, with both entries in it, as this png")
+    ap.add_argument("--ghost-desktop", help="save a picture of the ghost session's desktop, with the mode in the bar "
+                    "and the notification that says what it means, as this png")
     ap.add_argument("--tpm", help="give the machine a software tpm, seal a key for persist to it from the owned "
                     "machine's shell, and boot the same drive five times: with the key, on another machine's tpm, "
                     "back on its own, and after the key is wiped. This directory holds the tpm state")
@@ -2440,9 +2450,11 @@ def main():
 
         before = drive_slices("before the ghost boot")
 
-        # and now the ghost entry, picked out of the menu systemd-boot draws for three seconds
-        boot_kept("the ghost entry", os.path.join(work, "qmp-ghost.sock"), ghost=True,
-                  menu_png=args.ghost_menu)
+        # and now the ghost entry, picked out of the menu systemd-boot draws for three seconds. the
+        # monitor is this boot's own, which is what the pictures below are taken through: the first
+        # boot's socket went with it
+        ghost_qmp = os.path.join(work, "qmp-ghost.sock")
+        boot_kept("the ghost entry", ghost_qmp, ghost=True, menu_png=args.ghost_menu)
         if expect([PROMPT, PASSPHRASE], "the shell of the ghost boot") == 1:
             fail("the ghost boot asked for a passphrase, and it has nothing to check one against")
         ok("shell on the ghost boot, with no passphrase asked for")
@@ -2501,6 +2513,98 @@ def main():
         if "fs=tmpfs" not in without_console(output):
             fail(f"var is not a tmpfs on the ghost boot: {without_console(output).strip()!r}")
         ok(f"the ghost boot has the machine id {ghost_machine}, and var is in memory with it")
+
+        # what the session says it is. ADR-0083: the two words in the bar for the whole login, the
+        # sentence in a notification that stays until it is closed, and the same sentence over the
+        # rows of rift doctor, which is the one place that already says a component is not there
+        run("set -x XDG_RUNTIME_DIR /run/user/(id -u)", "the runtime directory")
+
+        def ghost_state(what):
+            """What `lens --state` prints, as a dict of the words it knows. A shell that has not
+            taken its socket yet answers nothing, which every caller asks again for."""
+            status, output = run("lens --state", what)
+            printed = without_console(output)
+            if status != 0:
+                return {}
+            state = {}
+            for printed_line in printed.splitlines():
+                key, _, value = printed_line.strip().partition(" ")
+                if key in STATE_KEYS:
+                    state[key] = value.strip()
+            return state
+
+        said = waiting(args.desktop_timeout + 240,
+                       lambda: ghost_state("the shell of the ghost session") or None) or {}
+        if said.get("ghost") != "on":
+            fail(f"the shell says ghost {said.get('ghost')!r} on a ghost boot, out of {said}")
+        if said.get("latest") != GHOST_NAME:
+            fail(f"the notification at the ghost login is {said.get('latest')!r}, not {GHOST_NAME!r}")
+        if said.get("banners") in (None, "none"):
+            fail(f"the ghost login's notification is not on screen: banners {said.get('banners')!r}")
+        ok(f"the shell says ghost on, and the notification {GHOST_NAME!r} is on screen "
+           f"({said.get('banners')})")
+
+        # the picture, before anything is opened over it
+        if args.ghost_desktop:
+            try:
+                width, height, rgb = screendump(ghost_qmp, work, "ghost-desktop")
+                write_png(args.ghost_desktop, width, height, rgb)
+                print(f"\nboot-test: wrote {args.ghost_desktop}, {width}x{height}", flush=True)
+            except (OSError, RuntimeError) as why:
+                fail(f"the picture {args.ghost_desktop} could not be taken: {why}")
+
+        # rift doctor says the mode over its rows, and the rows the mode explains pass, so a boot
+        # that is working exits 0. Orbit, Quasar, Vault and Airlock are all on the bus in a ghost
+        # boot: each one finds its directory empty, which is what the initrd makes them
+        status, output = run("rift doctor", "rift doctor on the ghost boot")
+        printed = without_console(output)
+        if GHOST_SENTENCE not in printed:
+            fail(f"rift doctor does not say what ghost mode is: {printed.strip()[-500:]!r}")
+        if not re.search(r"^Persist\s+Passed\s+Ghost mode, persist is locked", printed, re.M):
+            fail(f"rift doctor's persist row is not the mode working: {printed.strip()[-500:]!r}")
+        if not re.search(r"^Quasar\s+Passed\s+Ghost mode, the models", printed, re.M):
+            fail(f"rift doctor's quasar row is not the mode working: {printed.strip()[-500:]!r}")
+        if not re.search(r"^Orbit\s+Passed\s+On the bus", printed, re.M):
+            fail(f"Orbit is not on the bus in a ghost boot: {printed.strip()[-500:]!r}")
+        if status != 0:
+            fail(f"rift doctor exited with {status} on a working ghost boot: {printed.strip()[-500:]!r}")
+        ok("rift doctor says the mode over its rows, persist and Quasar pass because the mode "
+           "explains them, and it exits 0")
+
+        # and Welcome did not open by itself, since nothing it sets would be kept
+        _, output = run("set -x NIRI_SOCKET (ls -t /run/user/(id -u)/niri.wayland-1.*.sock | head -n1); "
+                        "horizon msg --json windows", "horizon's windows at the ghost login")
+        if WELCOME_APP_ID in without_console(output):
+            fail("Welcome opened by itself at a ghost login, and nothing it sets there is kept")
+        # it still opens from the Applications menu, and says there what is not kept
+        run("systemd-run --user --quiet --collect rift-welcome", "Welcome started by hand")
+
+        def ghost_welcome(what):
+            status, output = run("rift-welcome --state", what)
+            if status != 0:
+                return {}
+            lines = {}
+            for printed_line in without_console(output).splitlines():
+                key, _, value = printed_line.strip().partition(" ")
+                if key:
+                    lines[key] = value.strip()
+            return lines
+
+        welcome = waiting(180, lambda: ghost_welcome("what Welcome says in a ghost session") or None) or {}
+        # the page is its start page, or the one that says there is no network while the network is
+        # still coming up, which turns into the start page by itself
+        if welcome.get("ghost") != "on" or welcome.get("page") not in ("start", "offline"):
+            fail(f"Welcome in a ghost session says ghost {welcome.get('ghost')!r} and page "
+                 f"{welcome.get('page')!r}")
+        if args.ghost_desktop:
+            stem, extension = os.path.splitext(args.ghost_desktop)
+            try:
+                width, height, rgb = screendump(ghost_qmp, work, "ghost-welcome")
+                write_png(f"{stem}-welcome{extension}", width, height, rgb)
+                print(f"\nboot-test: wrote {stem}-welcome{extension}, {width}x{height}", flush=True)
+            except (OSError, RuntimeError) as why:
+                print(f"\nboot-test: the picture of Welcome could not be taken: {why}", flush=True)
+        ok("Welcome did not open by itself, and the one started by hand says it is a ghost session")
 
         # a file written in it, to prove it is gone at the next boot
         status, output = run(f"echo '{ghost_words}' > {GHOST_LETTER}", "a file in the ghost session's home")
