@@ -312,6 +312,7 @@ impl Welcome {
             format!("page {}", self.page.word()),
             format!("network {}", if self.online { "online" } else { "offline" }),
             format!("welcomed {}", if note::welcomed() { "yes" } else { "no" }),
+            format!("ghost {}", if librift::ghost::on() { "on" } else { "off" }),
             format!(
                 "window {}",
                 if self.window.is_some() {

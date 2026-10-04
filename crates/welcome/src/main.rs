@@ -3,7 +3,8 @@
 //! Flathub, and shows how to run more programming languages.
 //!
 //! `rift-welcome` opens the window, or brings up the one that is open. `rift-welcome --login` is
-//! what the session starts at every login: it opens only on a drive that has not been welcomed.
+//! what the session starts at every login: it opens only on a drive that has not been welcomed, and
+//! never in Ghost mode, where nothing it sets would be kept.
 //! `rift-welcome --page <name>` opens or shows one page, `rift-welcome --set <name> <value>` does
 //! what pressing it on its page would, and `rift-welcome --state` prints the page that is up and
 //! what the window knows.
@@ -77,8 +78,14 @@ fn main() -> ExitCode {
 }
 
 /// At a login: open on a drive that has not been welcomed, and on no other.
+///
+/// Never in Ghost mode. The note that says a drive has been welcomed is in home, and in Ghost mode
+/// home is memory, so there is never a note and Welcome would open at every Ghost login. It would
+/// also be offering to keep things a session that keeps nothing cannot: the wallpaper, the accent
+/// and the Flatpaks all go when the machine does. It still opens from the Applications menu, and the
+/// start page says there what is not kept.
 fn login() -> ExitCode {
-    if note::welcomed() || control::already_open() {
+    if librift::ghost::on() || note::welcomed() || control::already_open() {
         return ExitCode::SUCCESS;
     }
     run(ui::Start::default())

@@ -1,6 +1,7 @@
 //! The start page, with the mark, what Welcome is for and the way on, and the page that takes its
 //! place when there is no network: it says so, offers to open Welcome later, and turns into the
-//! start page by itself once there is one.
+//! start page by itself once there is one. In Ghost mode the page says that nothing it sets is
+//! kept, since Welcome only opens there when somebody asks for it.
 
 use std::path::Path;
 
@@ -40,7 +41,15 @@ pub fn view(state: &Welcome, look: Colors) -> Element<'_, Message> {
             [
                 "Rift is running from this drive. The next pages set how the desktop looks, \
                  install apps from Flathub, and show how to run more programming languages.",
-                "All of it can be changed later, and Welcome stays in the Applications menu.",
+                // a Ghost session keeps nothing, so the second sentence says that instead of
+                // saying it can all be changed later. Welcome does not open by itself here, so
+                // anyone reading this asked for it from the Applications menu
+                if librift::ghost::on() {
+                    "This is a Ghost session, so none of it is kept: the drive stays locked and \
+                     everything here is in memory until the machine goes off."
+                } else {
+                    "All of it can be changed later, and Welcome stays in the Applications menu."
+                },
             ],
             row![
                 action(look, "Close", Some(Message::Close)),
