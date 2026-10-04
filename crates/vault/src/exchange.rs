@@ -11,7 +11,13 @@
 //! It is found the way a clone finds the running drive: udev names the esp of the drive the system
 //! started from, the partition table of the disk that esp is on says which partition is called
 //! `exchange`, and its partition uuid names the device. A partition of that name on any other disk
-//! is never touched.
+//! is never touched. udev has no name of its own for it, the way it has `esp` for the esp, because
+//! the designators it knows are the ones in the discoverable partitions specification and this is
+//! basic data, so the table is the only place the name is written down.
+//!
+//! A Ghost boot does not mount it, because mounting a vfat writes to it, and the owner can still
+//! ask for it from Files, which is what [`Exchange::there`] and the `MountExchange` method on the
+//! bus are for (ADR-0085). Reading the table to say the drive has one writes nothing.
 
 use std::fs::{self, File};
 use std::io::Read as _;
@@ -27,6 +33,11 @@ use crate::slots::disk_of;
 const LABEL: &str = "exchange";
 /// Where it is mounted.
 pub const FOLDER: &str = "/exchange";
+/// The unit that mounts it when the owner asks, which is the twin of the one the boot runs: it
+/// carries no condition and nothing wants it, so it runs only when it is started by hand. Vault
+/// answers the bus inside a mount namespace of its own, where a mount would be invisible to
+/// everything else on the machine, the way vault-owner.service writes the password files outside it.
+const ASKED: &str = "vault-exchange-asked.service";
 /// The file systems that keep no owners of their own and take the mount's instead. exFAT is what
 /// a new drive's exchange partition is formatted as, and the other three are what a person who
 /// formats it on another system is likely to leave.
@@ -48,6 +59,22 @@ pub struct Exchange {
 }
 
 impl Exchange {
+    /// Whether this drive has an exchange partition with a file system on it, which is the one
+    /// thing a sidebar needs to know that only root can read: the partition table of the drive.
+    ///
+    /// False for a drive written without one, and for one whose partition has no file system yet,
+    /// which is what a drive written on macOS or Windows has until its first boot formats it.
+    ///
+    /// # Errors
+    ///
+    /// A sentence when the drive's table or the partition could not be read.
+    pub fn there(&self) -> Result<bool, String> {
+        let Some(device) = self.device()? else {
+            return Ok(false);
+        };
+        Ok(!fstype(&device)?.is_empty())
+    }
+
     /// Mount it, and say so. Nothing when the drive has no exchange partition, when it holds no
     /// file system yet, or when it is mounted already.
     ///
@@ -134,6 +161,26 @@ impl Exchange {
     }
 }
 
+/// Have the unit mount it now, and say where it went. What the `MountExchange` method on the bus
+/// runs, and the only thing that mounts the partition in a Ghost boot.
+///
+/// # Errors
+///
+/// A sentence when systemctl could not be run or the unit failed.
+pub fn mount_now() -> Result<String, String> {
+    let done = Command::new("systemctl")
+        .args(["start", ASKED])
+        .output()
+        .map_err(|e| format!("Could not run systemctl: {e}"))?;
+    if !done.status.success() {
+        return Err(format!(
+            "Could not mount the exchange partition: {}",
+            String::from_utf8_lossy(&done.stderr).trim()
+        ));
+    }
+    Ok(FOLDER.to_string())
+}
+
 /// The kind of file system on a device, as the kernel's own probe reads it. Empty when there is
 /// none, which is what a drive written on macOS or Windows has until its first boot formats it.
 fn fstype(device: &Path) -> Result<String, String> {
@@ -189,5 +236,6 @@ mod tests {
         };
         assert_eq!(exchange.device(), Ok(None));
         assert_eq!(exchange.mount(), Ok(None));
+        assert_eq!(exchange.there(), Ok(false));
     }
 }

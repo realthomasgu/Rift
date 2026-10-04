@@ -46,10 +46,12 @@ passphrase, because there is nothing to unlock. You get a working Rift with none
 of your settings, no apps you installed and no AI models. Anything you make in it lives in memory
 until the machine is turned off.</p>
 <p>Use it to lend the computer to somebody, to open something you would rather leave no trace of, or
-to check that the drive still starts when you have forgotten what you changed. The exchange partition
-is not mounted in Ghost mode either, because mounting it writes to it, and a Ghost session has no way
-to mount it by hand yet. To hand a file to another computer from a Ghost session, use a second USB
-stick.</p>
+to check that the drive still starts when you have forgotten what you changed.</p>
+<p>The exchange partition is the one part of the drive a Ghost session reaches. Nothing mounts it
+there on its own, because mounting it writes to it, and a session that keeps nothing has to keep that
+promise about the plain partition too. Files lists it in the sidebar as a place that is not mounted;
+select it and it is mounted, and you can hand a file to another computer from a session that keeps
+nothing else. What you put there is on the drive afterwards, because you asked for it.</p>
 <p>What a Ghost session cannot do, it says. Anything that reads or writes the drive answers with one
 sentence naming the mode, rather than failing on a missing file or saying there is nothing there.
 That is <code>rift ai</code>, which has no models to run; <code>rift snapshot</code> and

@@ -17,7 +17,7 @@ use iced::keyboard::{self, Modifiers};
 use iced::widget::scrollable::Viewport;
 use iced::{Point, Size, Subscription, Task, Theme, event, mouse, theme, window};
 use librift::appearance::Look;
-use librift::drives::{self, Volume};
+use librift::drives::{self, Exchange, Volume};
 use librift::files::places::{self, Place};
 use librift::files::trash::{self as bin, Trash, Trashed};
 use librift::files::{self, Entry, Options, Sort, mime};
@@ -94,8 +94,9 @@ pub struct Files {
     pub drives: Vec<Volume>,
     /// The moments Vault last listed, oldest first, for the windows that show one.
     pub moments: Vec<String>,
-    /// The drive's own exchange partition, when it has one and the system has mounted it.
-    pub exchange: Option<PathBuf>,
+    /// The drive's own exchange partition: where it is mounted, or that it is there to be mounted,
+    /// which is what a Ghost session has.
+    pub exchange: Exchange,
     /// The disks being mounted, unmounted or ejected at the moment, by what names them on the bus,
     /// so a row says what it is doing and is not pressed twice.
     pub working: Vec<String>,
@@ -206,6 +207,9 @@ pub enum Act {
     Properties,
     /// Ask for the passphrase of this locked disk.
     Unlock(String),
+    /// Mount the drive's own exchange partition and go to it, which only a Ghost session needs:
+    /// every other boot has it mounted before anyone logs in.
+    MountExchange,
 }
 
 /// What a press, a key, a line on the socket or a job asks for.
@@ -301,6 +305,11 @@ pub enum Message {
     Opened(window::Id),
     /// What udisks says is plugged in now.
     Drives(Vec<Volume>),
+    /// Whether the drive has an exchange partition, as Vault answered. Asked once, since a drive
+    /// does not grow one while the machine is on.
+    Exchange(bool),
+    /// The exchange partition was mounted, or it was not: where it went or what went wrong.
+    Mounted(Option<window::Id>, Box<Result<PathBuf, String>>),
     /// A disk was mounted, unmounted or ejected, or it was not: which one, what was being done,
     /// and where it went or what went wrong.
     Disk(
@@ -393,7 +402,7 @@ fn boot(start: &Start) -> (Files, Task<Message>) {
         places: places::places(),
         drives: Vec::new(),
         moments: Vec::new(),
-        exchange: drives::exchange(),
+        exchange: first_exchange(),
         working: Vec::new(),
         clipboard: None,
         jobs: Vec::new(),
@@ -406,7 +415,7 @@ fn boot(start: &Start) -> (Files, Task<Message>) {
         waiting: start.bus.then(|| std::time::Instant::now() + BUS_WAIT),
     };
     state.trash_full = state.anything_trashed();
-    let work: Vec<Task<Message>> = if start.bus {
+    let mut work: Vec<Task<Message>> = if start.bus {
         // the call that started the app says what to show, and opens the window for it
         Vec::new()
     } else if start.open.is_empty() {
@@ -418,8 +427,39 @@ fn boot(start: &Start) -> (Files, Task<Message>) {
             .map(|path| open_path(&mut state, path))
             .collect()
     };
+    // whether the drive has an exchange partition is written in its table and nowhere else, so
+    // Vault is the one that can say. It is asked once: a drive does not grow one while the machine
+    // is on, and on every boot but a Ghost one the partition is mounted here already
+    if state.exchange == Exchange::None {
+        work.push(actions::look_at_exchange());
+    }
     keep(&state);
     (state, Task::batch(work))
+}
+
+/// What the drive's exchange partition starts as: the folder it is mounted at, which is every boot
+/// but a Ghost one, or nothing until Vault has said whether the drive has one at all.
+fn first_exchange() -> Exchange {
+    if let Some(path) = drives::exchange() {
+        return Exchange::At(path);
+    }
+    #[cfg(debug_assertions)]
+    if AS_GHOST.load(std::sync::atomic::Ordering::Relaxed) {
+        // told to draw as a Ghost session does, so the row is there and nothing has mounted it
+        return Exchange::There;
+    }
+    Exchange::None
+}
+
+/// Whether this process was told to draw as a Ghost session does. A debug build only, for a picture
+/// of the sidebar on a machine that cannot boot a Rift drive (ADR-0085).
+#[cfg(debug_assertions)]
+static AS_GHOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Draw as a Ghost session does from here on. `--as-ghost` calls it before anything is read.
+#[cfg(debug_assertions)]
+pub fn as_ghost() {
+    AS_GHOST.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Home, or the root of the file system on a machine with no home.
@@ -592,8 +632,9 @@ impl Files {
     #[must_use]
     pub fn tops(&self) -> Vec<PathBuf> {
         self.exchange
-            .iter()
-            .cloned()
+            .mount()
+            .map(Path::to_path_buf)
+            .into_iter()
             .chain(self.drives.iter().filter_map(|drive| drive.mount.clone()))
             .collect()
     }
@@ -666,10 +707,7 @@ impl Files {
                 ),
                 None => "clipboard none".to_string(),
             },
-            match &self.exchange {
-                Some(path) => format!("exchange {}", path.display()),
-                None => "exchange none".to_string(),
-            },
+            format!("exchange {}", self.exchange.word()),
         ];
         for drive in &self.drives {
             lines.push(format!(
@@ -797,6 +835,13 @@ fn answered(state: &mut Files, message: Message) -> Task<Message> {
         }
         Message::Tick => tick(state),
         Message::Drives(found) => drives_read(state, found),
+        Message::Exchange(there) => {
+            if there && state.exchange == Exchange::None {
+                state.exchange = Exchange::There.again();
+            }
+            Task::none()
+        }
+        Message::Mounted(id, done) => actions::exchange_done(state, id, *done),
         Message::Disk(id, drive, done) => actions::disk_done(state, id, &drive, *done),
         Message::Job(number, step) => actions::job_step(state, number, step),
         Message::ToastGone(id, number) => {
@@ -1031,7 +1076,7 @@ fn tick(state: &mut Files) -> Task<Message> {
     if look != state.look {
         state.look = look;
     }
-    state.exchange = drives::exchange();
+    state.exchange = state.exchange.again();
     state.trash_full = state.anything_trashed();
     let stamps: Vec<(window::Id, Stamp)> = state
         .windows

@@ -71,17 +71,25 @@ takes it off before the second: localed and horizon have it in the boot after th
 has English (US) alone after the second, which localed keeps on persist too. The test ends there.
 
 With --ghost the test boots the drive's second entry, Ghost mode, instead of the checks below. It
-boots the drive three times, keeping it in a file between them: ordinarily, with a file written into
+boots the drive four times, keeping it in a file between them: ordinarily, with a file written into
 home; then the ghost entry, held out of systemd-boot's hidden menu with the space bar sent through
 the qemu monitor, where persist is not open, no unit for it was ever made, home is a tmpfs with
 nothing of the drive in it, the esp and the exchange partition are both unmounted and the machine id
 is one of its own. It also reads back what the session says it is: the shell's own state says the
 mode, the notification that says what the mode means is on screen, rift doctor says the same sentence
 over its rows and passes persist because the mode locks it, and Welcome did not open by itself but
-says it is a ghost session when it is started by hand. Then ordinarily again, where the file written
-in the ghost session is gone and the one written before it is still there. The whole drive is hashed
-before the ghost boot and after it and the two have to match. --ghost-menu saves a picture of the
-menu with both entries in it, --ghost-desktop one of the session with the mode in its bar.
+says it is a ghost session when it is started by hand. The whole drive is hashed before that boot and
+after it and the two have to match outside the esp: nobody asked it for anything, so it wrote
+nothing.
+
+Then the ghost entry once more, where the owner does ask: Files lists the drive's exchange partition
+as a place nothing has mounted, a press mounts it through Vault, and a file written onto it
+is on the drive at the next boot. The drive is hashed again after that one, and this time the esp and
+the exchange partition are the only parts of it allowed to have moved. Then ordinarily again, where
+the file written into the ghost session's home is gone, the one written before it is still there and
+the one the owner put on the exchange partition is too. --ghost-menu saves a picture of the menu with
+both entries in it, --ghost-desktop one of the session with the mode in its bar, and one of Files'
+sidebar in the session where the partition has not been mounted.
 
 The drive: the vm app writes it from the image into a sparse file with rift-flash, with an exchange
 partition when --exchange gives its size. Persist has to be luks2 with argon2id, the settings a person
@@ -509,6 +517,9 @@ FILES_MEANING = "bicycle repair"
 FILES_FOUND = "notes/bike.txt"
 # the disks in Files' sidebar: the drive's own exchange partition and the stick --stick attaches
 DRIVE_EXCHANGE = "/exchange"
+# the two units that mount it, from nix/modules/vault.nix: the one every boot but a ghost one runs,
+# and the one Vault starts when the owner asks for it in Files
+EXCHANGE_UNITS = ("vault-exchange.service", "vault-exchange-asked.service")
 DRIVE_LABEL = "STICK"
 DRIVE_MOUNT = f"/run/media/rift/{DRIVE_LABEL}"
 DRIVE_FILE = "handover.txt"
@@ -1592,6 +1603,8 @@ def main():
         ap.error("--ghost writes the drive with its persist, so it does not go with --first-boot")
     if args.ghost and args.tpm:
         ap.error("--ghost and --tpm each keep a drive of their own, so they are separate runs")
+    if args.ghost and not args.exchange:
+        ap.error("--ghost mounts the drive's exchange partition by hand, so it needs --exchange")
     with open(args.passfile, encoding="utf-8") as f:
         passphrase = f.read()
 
@@ -2315,8 +2328,12 @@ def main():
     if args.ghost:
         KEPT_LETTER = f"/home/{OWNER_USER}/kept.txt"
         GHOST_LETTER = f"/home/{OWNER_USER}/ghost.txt"
+        # the one thing a ghost session can leave on the drive, because the owner asked for the
+        # partition it goes on to be mounted
+        ASKED_LETTER = f"{DRIVE_EXCHANGE}/asked.txt"
         kept_words = "written before ghost mode"
         ghost_words = "written in ghost mode"
+        asked_words = "handed to another computer"
         machine_id = r"^\s*([0-9a-f]{32})\s*$"
         # the drive is counted a mebibyte at a time, so a write can be named by where it landed
         SLICE = 1 << 20
@@ -2343,20 +2360,22 @@ def main():
                   flush=True)
             return found
 
-        def esp_slices():
-            """Which mebibytes of the drive the esp is, read off its own partition table. The esp is
-            the one part a ghost boot is allowed to change: systemd-boot writes to that file system
-            before the kernel starts, to take a try off a boot counter and for its own bookkeeping,
-            and that is the firmware's write and not the session's."""
+        def partition_slices(label):
+            """Which mebibytes of the drive a partition is, read off its own table. The esp is the
+            one part a ghost boot is allowed to change with nobody asking: systemd-boot writes to
+            that file system before the kernel starts, to take a try off a boot counter and for its
+            own bookkeeping, and that is the firmware's write and not the session's. The exchange
+            partition is the one part the owner can ask to have mounted, which writes to it
+            (ADR-0085)."""
             out = subprocess.run(["sfdisk", "--json", kept], capture_output=True, text=True)
             if out.returncode != 0:
                 fail(f"sfdisk could not read the drive's partition table: {out.stderr.strip()!r}")
             table = json.loads(out.stdout)["partitiontable"]
             sector = table.get("sectorsize", 512)
-            esp = next((p for p in table["partitions"] if p.get("name") == "esp"), None)
-            if not esp:
-                fail(f"the drive has no partition called esp: {table.get('partitions')}")
-            start, size = esp["start"] * sector, esp["size"] * sector
+            found = next((p for p in table["partitions"] if p.get("name") == label), None)
+            if not found:
+                fail(f"the drive has no partition called {label}: {table.get('partitions')}")
+            start, size = found["start"] * sector, found["size"] * sector
             return start // SLICE, (start + size - 1) // SLICE
 
         def waiting(seconds, ready):
@@ -2509,6 +2528,17 @@ def main():
             if status == 0 and without_console(output).strip():
                 fail(f"{folder} is mounted on the ghost boot: {without_console(output).strip()!r}")
         ok("persist, the exchange partition and the esp are all unmounted on the ghost boot")
+
+        # and neither unit that mounts the exchange partition has run. The one every other boot
+        # runs is held out by its own condition; the one the owner's press starts is wanted by
+        # nothing, so it runs when it is started and at no other time (ADR-0085)
+        for unit in EXCHANGE_UNITS:
+            _, output = run(f"systemctl is-active {unit} | cat", f"whether {unit} ran")
+            said = without_console(output)
+            if "inactive" not in said:
+                fail(f"{unit} is {said.strip()[-200:]!r} on the ghost boot, where nothing may have "
+                     "mounted the exchange partition")
+        ok(f"neither {EXCHANGE_UNITS[0]} nor {EXCHANGE_UNITS[1]} has run on the ghost boot")
 
         # a machine id of its own and a journal that is only in memory
         ghost_machine = one_line("cat /etc/machine-id", "the machine id of the ghost boot", machine_id)
@@ -2705,21 +2735,130 @@ def main():
         power_off()
 
         after = drive_slices("after the ghost boot")
-        first, last = esp_slices()
-        if len(before) != len(after):
-            fail(f"the drive was {len(before)} mebibytes before the ghost boot and is {len(after)}")
-        changed = [n for n, (was, now) in enumerate(zip(before, after)) if was != now]
-        outside = [n for n in changed if not first <= n <= last]
-        if changed:
-            print(f"\nboot-test: the mebibytes that changed are {changed[:20]}"
-                  f"{' and more' if len(changed) > 20 else ''}, and the esp is {first} to {last}",
-                  flush=True)
-        if outside:
-            fail(f"the ghost boot wrote to {len(outside)} mebibytes of the drive outside the esp, "
-                 f"at {outside[:10]}, where 0 is the partition table and everything after the esp "
-                 f"is the store, persist and the exchange partition")
+        esp_first, esp_last = partition_slices("esp")
+
+        def changes(was, now, allowed, what):
+            """The mebibytes of the drive that moved, and a failure when one of them is outside the
+            ranges this boot was allowed to write to."""
+            if len(was) != len(now):
+                fail(f"the drive was {len(was)} mebibytes before {what} and is {len(now)}")
+            moved = [n for n, (then, since) in enumerate(zip(was, now)) if then != since]
+            outside = [n for n in moved
+                       if not any(low <= n <= high for _, low, high in allowed)]
+            ranges = ", ".join(f"the {name} is {low} to {high}" for name, low, high in allowed)
+            if moved:
+                print(f"\nboot-test: the mebibytes that changed are {moved[:20]}"
+                      f"{' and more' if len(moved) > 20 else ''}, and {ranges}", flush=True)
+            if outside:
+                fail(f"{what} wrote to {len(outside)} mebibytes of the drive outside {ranges}, "
+                     f"at {outside[:10]}, where 0 is the partition table and everything after the "
+                     f"esp is the store, persist and the exchange partition")
+            return moved
+
+        changed = changes(before, after, [("esp", esp_first, esp_last)], "the ghost boot")
         ok(f"the ghost boot wrote nothing to the drive but {len(changed)} mebibytes of the esp, "
            f"which the firmware writes before the kernel starts")
+
+        # 1f again: the ghost entry with the owner asking for something. The exchange partition is
+        # the plain one every other computer can read, and a ghost boot does not mount it, because
+        # mounting a vfat writes to it. Files lists it as a place nothing has mounted and a press
+        # mounts it through Vault, which is the owner's own choice and not the boot's (ADR-0085).
+        # This is a boot of its own so that the count above is of a session nobody asked anything of
+        asked_qmp = os.path.join(work, "qmp-ghost-asked.sock")
+        boot_kept("the ghost entry with the owner asking", asked_qmp, ghost=True)
+        if expect([PROMPT, PASSPHRASE], "the shell of the second ghost boot") == 1:
+            fail("the second ghost boot asked for a passphrase")
+        ok("shell on the ghost boot the owner asks in")
+        run("set -x XDG_RUNTIME_DIR /run/user/(id -u)", "the runtime directory")
+        said = waiting(args.desktop_timeout + 240,
+                       lambda: ghost_state("the shell of the second ghost session") or None) or {}
+        if said.get("ghost") != "on":
+            fail(f"the second ghost session says ghost {said.get('ghost')!r}, out of {said}")
+
+        def ghost_files(what):
+            """What rift-files --state prints, a line each, or nothing while it does not answer."""
+            status, output = run("rift-files --state", what)
+            if status != 0:
+                return None
+            return [line.strip() for line in without_console(output).splitlines() if line.strip()]
+
+        def ghost_files_says(key, lines):
+            for printed in lines or []:
+                if printed.startswith(key + " "):
+                    return printed[len(key) + 1:]
+            return None
+
+        def ghost_files_until(seconds, key, value, what):
+            """Ask Files until one word of its state says this, and answer all of its lines."""
+            until = time.monotonic() + seconds
+            while True:
+                lines = ghost_files(what)
+                if ghost_files_says(key, lines) == value:
+                    return lines
+                if time.monotonic() > until:
+                    fail(f"Files says {key} {ghost_files_says(key, lines)!r} after {seconds} s, not "
+                         f"{value!r}; its state is {lines!r}"[:1200])
+                time.sleep(2)
+
+        run("systemd-run --user --quiet --collect rift-files", "Files in the ghost session")
+        ghost_files_until(180, "exchange", "there", "what Files says in a ghost session")
+        ok("Files lists the drive's exchange partition as a place nothing has mounted")
+
+        # the picture of the sidebar with that row in it, before anything is pressed
+        if args.ghost_desktop:
+            stem, extension = os.path.splitext(args.ghost_desktop)
+            # the window is drawn a moment after its state answers, the way Settings' is
+            time.sleep(3)
+            try:
+                width, height, rgb = screendump(asked_qmp, work, "ghost-files")
+                write_png(f"{stem}-files{extension}", width, height, rgb)
+                print(f"\nboot-test: wrote {stem}-files{extension}, {width}x{height}", flush=True)
+            except (OSError, RuntimeError) as why:
+                fail(f"the picture of Files could not be taken: {why}")
+
+        # and the press, which is a press on the row and nothing else: Vault mounts it and the
+        # window goes there
+        status, output = run('rift-files --set place exchange', "the exchange partition pressed")
+        if status != 0:
+            fail(f"rift-files --set place exchange exited with {status}: "
+                 f"{without_console(output).strip()[-300:]!r}")
+        shown = ghost_files_until(180, "exchange", DRIVE_EXCHANGE, "Files after the press")
+        if ghost_files_says("location", shown) != DRIVE_EXCHANGE:
+            fail(f"the window is at {ghost_files_says('location', shown)!r} after the press, not "
+                 f"{DRIVE_EXCHANGE}")
+        _, output = run(f"findmnt --noheadings --output SOURCE,FSTYPE {DRIVE_EXCHANGE}",
+                        "the exchange partition the owner asked for")
+        if "exfat" not in without_console(output):
+            fail(f"{DRIVE_EXCHANGE} is not the drive's exfat partition after the press: "
+                 f"{without_console(output).strip()!r}")
+        _, output = run(f"systemctl is-active {EXCHANGE_UNITS[1]} | cat",
+                        f"whether {EXCHANGE_UNITS[1]} ran for the press")
+        if "active" not in without_console(output):
+            fail(f"{EXCHANGE_UNITS[1]} did not run for the press: "
+                 f"{without_console(output).strip()[-200:]!r}")
+        ok(f"a press mounted the drive's exchange partition at {DRIVE_EXCHANGE} through "
+           f"{EXCHANGE_UNITS[1]}, and the window is there")
+
+        # a file onto it, which is the whole point of the partition: it is the one thing a ghost
+        # session can leave on the drive, and it is there because the owner put it there
+        status, output = run(f"echo '{asked_words}' > {ASKED_LETTER}; stat -c owner=%U {ASKED_LETTER}",
+                             "a file on the exchange partition")
+        if status != 0 or f"owner={OWNER_USER}" not in without_console(output):
+            fail(f"{ASKED_LETTER} is not the owner's own: {without_console(output).strip()!r}")
+        ok(f"{ASKED_LETTER} is on the drive's exchange partition, written by the owner")
+        power_off()
+
+        asked = drive_slices("after the ghost boot the owner asked in")
+        exchange_first, exchange_last = partition_slices("exchange")
+        changed = changes(after, asked,
+                          [("esp", esp_first, esp_last),
+                           ("exchange partition", exchange_first, exchange_last)],
+                          "the ghost boot the owner asked in")
+        if not any(exchange_first <= n <= exchange_last for n in changed):
+            fail("the exchange partition did not change in the boot that mounted it, so nothing "
+                 "was written where the file went")
+        ok(f"the ghost boot the owner asked in wrote to {len(changed)} mebibytes of the drive, all "
+           f"of them the esp or the exchange partition it was asked to mount")
 
         # and the ordinary entry again: the ghost session left nothing, and persist still opens
         boot_kept("the ordinary entry again", os.path.join(work, "qmp-after.sock"))
@@ -2739,8 +2878,12 @@ def main():
         _, output = run("findmnt -no TARGET --mountpoint /exchange", "the exchange partition after the ghost boot")
         if "/exchange" not in without_console(output):
             fail("the exchange partition is not mounted again after the ghost boot")
+        # the file the owner put on it is the one thing they asked for and the one thing that is
+        # still here, which is what the partition is for
+        if asked_words not in contents(ASKED_LETTER):
+            fail(f"{ASKED_LETTER}, which the owner wrote in a ghost session, is not on the drive")
         ok(f"nothing of the ghost session survived, {KEPT_LETTER} is still there, home is on persist "
-           f"again and the exchange partition is mounted")
+           f"again, the exchange partition is mounted and {ASKED_LETTER} is on it")
         power_off()
         print(f"\nboot-test: PASSED in {since()}", flush=True)
         return

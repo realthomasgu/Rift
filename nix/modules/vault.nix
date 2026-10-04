@@ -180,6 +180,22 @@ in
       };
     };
 
+    # the same mount, when the owner asks for it instead of the boot making it: Files offers the
+    # partition as a place in a ghost session and the MountExchange method on the bus starts this.
+    # it is a unit of its own because the one above carries the condition that keeps it out of a
+    # ghost boot, and a unit a condition skips cannot be started by hand either. nothing wants this
+    # one, so it runs when it is started and at no other time
+    systemd.services.vault-exchange-asked = {
+      description = "Vault, the exchange partition the owner asked for";
+      path = [ pkgs.util-linux ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${cfg.package}/bin/vault exchange";
+        ExecStop = "-${pkgs.util-linux}/bin/umount /exchange";
+      };
+    };
+
     # the hourly snapshot. systemd catches up once at boot when the drive was off at the hour
     systemd.services.vault-timeline = {
       description = "Vault, the hourly snapshot of home";

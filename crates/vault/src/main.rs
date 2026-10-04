@@ -204,6 +204,11 @@ fn main() -> ExitCode {
 /// the rift command get the sentence for what they ask. `owner` is not one either, because it runs
 /// at every boot and leaves the image's own name and password in place when persist has none, and
 /// the copy a restore runs is not, because the method that starts it has already refused.
+///
+/// `exchange` is not one of them any more. The boot does not mount the exchange partition in Ghost
+/// mode, which the unit's own condition sees to, and that is a different decision from refusing to
+/// mount it when the owner asks: the mode's promise is that Rift writes nothing to the drive, not
+/// that the owner may not (ADR-0085).
 fn not_in_ghost_mode(command: &Command) -> Option<&'static str> {
     match command {
         Command::Take => Some("A snapshot cannot be taken"),
@@ -213,8 +218,7 @@ fn not_in_ghost_mode(command: &Command) -> Option<&'static str> {
         Command::Backups => Some("Backups cannot be reached"),
         Command::Clone { .. } => Some("This drive cannot be cloned"),
         Command::EnrollKey => Some("A security key cannot be added to the drive"),
-        Command::Exchange => Some("The exchange partition cannot be mounted"),
-        Command::Serve | Command::Owner | Command::RestoreFile { .. } => None,
+        Command::Serve | Command::Owner | Command::Exchange | Command::RestoreFile { .. } => None,
     }
 }
 

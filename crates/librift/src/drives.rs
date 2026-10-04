@@ -8,8 +8,14 @@
 //!
 //! The drive Rift itself runs from is left out whole. On a real stick it is removable like any
 //! other, so its esp, its two slots and its locked persist would all be rows to mount; they are
-//! the drive's own, not disks to open. The exchange partition of the drive is mounted by the
-//! system at [`EXCHANGE`] and is a folder, not a disk to mount and eject.
+//! the drive's own, not disks to open.
+//!
+//! Its exchange partition is the one exception, and it is a shape of its own rather than a row of
+//! the list: [`Exchange`]. An ordinary boot mounts it at [`EXCHANGE`] before anyone logs in, so it
+//! is a folder like the ones in home. A Ghost boot mounts nothing of the drive, because mounting a
+//! vfat writes to it, so there it is a place the sidebar offers and the owner asks for (ADR-0085).
+//! Whether the drive has one at all is read off its partition table, which is root's to do, so
+//! Vault answers it and mounts it; everything here reads is the mount table.
 //!
 //! Nothing here mounts anything by itself. A disk that is plugged in appears, and it is mounted
 //! when the owner asks for it.
@@ -61,7 +67,63 @@ impl Volume {
     }
 }
 
-/// The exchange partition of the drive, when the drive has one and the system has mounted it.
+/// The drive's own exchange partition, as the sidebar has it.
+///
+/// It is not a [`Volume`]: there is nothing to eject, nothing to unlock and no disk to switch off,
+/// and it is never one of the disks a person plugged in. What a row needs to know about it is
+/// whether the drive has one and whether it is mounted.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Exchange {
+    /// The drive has none, or nothing has asked Vault yet.
+    #[default]
+    None,
+    /// The drive has one and nothing has mounted it, which is what a Ghost boot leaves. A press
+    /// mounts it.
+    There,
+    /// Mounted, at this folder.
+    At(PathBuf),
+}
+
+impl Exchange {
+    /// Where it is mounted, when it is.
+    #[must_use]
+    pub fn mount(&self) -> Option<&Path> {
+        match self {
+            Self::At(path) => Some(path),
+            Self::None | Self::There => None,
+        }
+    }
+
+    /// Whether there is a row for it at all.
+    #[must_use]
+    pub const fn listed(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// What `--state` prints after `exchange`: where it is, that it is there to be mounted, or
+    /// that the drive has none.
+    #[must_use]
+    pub fn word(&self) -> String {
+        match self {
+            Self::None => "none".to_string(),
+            Self::There => "there".to_string(),
+            Self::At(path) => path.display().to_string(),
+        }
+    }
+
+    /// The same partition after the mount table has been read again: a mount makes it [`Self::At`],
+    /// and an unmount leaves it [`Self::There`] rather than gone, since the drive still has it.
+    #[must_use]
+    pub fn again(&self) -> Self {
+        match (exchange(), self) {
+            (Some(path), _) => Self::At(path),
+            (None, Self::None) => Self::None,
+            (None, _) => Self::There,
+        }
+    }
+}
+
+/// The exchange partition of the drive, when the drive has one and something has mounted it.
 #[must_use]
 pub fn exchange() -> Option<PathBuf> {
     let top = crate::files::top_of(Path::new(EXCHANGE))?;
@@ -670,5 +732,24 @@ mod tests {
         // the folder is not mounted here, and a folder on the same file system as its parent is
         // not a partition
         assert_eq!(exchange(), None);
+    }
+
+    #[test]
+    fn a_partition_the_drive_has_stays_a_row_when_it_is_unmounted() {
+        // nothing is mounted at /exchange on the machine the tests run on, so again() is what a
+        // ghost session reads: a drive that has one keeps its row, a drive that has none has no row
+        assert_eq!(Exchange::There.again(), Exchange::There);
+        assert_eq!(
+            Exchange::At(PathBuf::from(EXCHANGE)).again(),
+            Exchange::There
+        );
+        assert_eq!(Exchange::None.again(), Exchange::None);
+        assert_eq!(Exchange::None.word(), "none");
+        assert_eq!(Exchange::There.word(), "there");
+        assert_eq!(Exchange::At(PathBuf::from("/exchange")).word(), "/exchange");
+        assert!(!Exchange::None.listed());
+        assert!(Exchange::There.listed() && Exchange::There.mount().is_none());
+        let mounted = Exchange::At(PathBuf::from("/exchange"));
+        assert_eq!(mounted.mount(), Some(Path::new("/exchange")));
     }
 }

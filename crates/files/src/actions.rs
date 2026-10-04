@@ -12,7 +12,7 @@ use iced::widget::operation::{self, AbsoluteOffset};
 use iced::{Point, Task, window};
 use librift::apps::{self, App};
 use librift::defaults::Found;
-use librift::drives;
+use librift::drives::{self, Exchange};
 use librift::files::trash::Trash;
 use librift::files::{self, Entry, Kind, Sort, free_name, mime};
 
@@ -216,6 +216,7 @@ pub fn act(state: &mut Files, id: window::Id, act: Act) -> Task<Message> {
         Act::Restore | Act::Forget | Act::Empty => trash_act(state, id, &act),
         Act::Mount(drive) => disk(state, id, &drive, Doing::Mount),
         Act::Eject(drive) => disk(state, id, &drive, Doing::Eject),
+        Act::MountExchange => mount_exchange(state, id),
         Act::Timeline => timeline_of(state, id),
         Act::Step { earlier } => step_to(state, id, earlier),
         Act::Now => now(state, id),
@@ -1609,6 +1610,70 @@ pub fn unlocked(
     }
 }
 
+/// Ask Vault whether the drive has an exchange partition, on a thread of its own. Vault reads the
+/// drive's own table for it, so it is asked once and the answer is kept.
+pub fn look_at_exchange() -> Task<Message> {
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let there = librift::vault::exchange().unwrap_or_else(|why| {
+            // a machine that is not a Rift drive has no Vault, and a sidebar with no row for a
+            // partition that is not there is the right answer
+            eprintln!("rift-files: {why}");
+            false
+        });
+        let _ = sender.send(Message::Exchange(there));
+    });
+    Task::perform(receiver, |said| said.unwrap_or(Message::Exchange(false)))
+}
+
+/// Mount the drive's own exchange partition, on a thread of its own, and go to it when it is
+/// there. Vault mounts it: udisks refuses the disk Rift is running from, and on a real stick it
+/// would offer every partition of the drive instead of this one.
+///
+/// A Ghost session is the only one that needs it, since every other boot mounts it before anyone
+/// logs in. Mounting it writes to the partition, which is why a Ghost boot leaves it to the owner.
+fn mount_exchange(state: &mut Files, id: window::Id) -> Task<Message> {
+    if let Some(path) = state.exchange.mount() {
+        return ui::go(state, id, Location::Folder(path.to_path_buf()));
+    }
+    if state.working.iter().any(|busy| busy == EXCHANGE) {
+        return Task::none();
+    }
+    state.working.push(EXCHANGE.to_string());
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let _ = sender.send(Message::Mounted(
+            Some(id),
+            Box::new(librift::vault::mount_exchange()),
+        ));
+    });
+    Task::perform(receiver, move |said| said.unwrap_or(Message::CloseMenu(id)))
+}
+
+/// What names the exchange partition while it is being mounted, so the row is not pressed twice.
+/// Nothing on the bus is called this, so it cannot be a disk's name.
+const EXCHANGE: &str = "exchange";
+
+/// The exchange partition was mounted, or it was not. It opens in the window that asked for it.
+pub fn exchange_done(
+    state: &mut Files,
+    id: Option<window::Id>,
+    done: Result<PathBuf, String>,
+) -> Task<Message> {
+    state.working.retain(|busy| busy != EXCHANGE);
+    state.exchange = state.exchange.again();
+    let here = id.filter(|id| state.windows.contains_key(id));
+    match (done, here) {
+        (Ok(folder), Some(id)) => ui::go(state, id, Location::Folder(folder)),
+        (Err(why), Some(id)) => toast(state, id, why, None),
+        (Err(why), None) => {
+            eprintln!("rift-files: {why}");
+            Task::none()
+        }
+        (Ok(_), None) => Task::none(),
+    }
+}
+
 /// Ask udisks what is there now, on a thread of its own.
 fn look_at_disks() -> Task<Message> {
     let (sender, receiver) = oneshot::channel();
@@ -1626,8 +1691,11 @@ fn place(state: &mut Files, id: window::Id, word: &str) -> Task<Message> {
         return ui::go(state, id, Location::Trash);
     }
     if word == "exchange" {
-        let path = state.exchange.clone();
-        return path.map_or_else(Task::none, |path| ui::go(state, id, Location::Folder(path)));
+        return match state.exchange {
+            // mounted already, or there and waiting to be asked for, which is a Ghost session
+            Exchange::At(_) | Exchange::There => mount_exchange(state, id),
+            Exchange::None => Task::none(),
+        };
     }
     if state.drives.iter().any(|drive| drive.name == word) {
         return by_name(state, id, word, Doing::Mount);

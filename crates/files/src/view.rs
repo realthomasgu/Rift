@@ -484,17 +484,23 @@ fn sidebar<'a>(
             Some(Message::Go(id, Location::Folder(place.path.clone()))),
         ));
     }
-    if !state.drives.is_empty() || state.exchange.is_some() {
+    if !state.drives.is_empty() || state.exchange.listed() {
         rows = rows.push(space().height(8.0));
     }
-    if let Some(path) = &state.exchange {
-        // the drive's own, mounted by the system, so it is a folder and never a disk to eject
+    if state.exchange.listed() {
+        // the drive's own, so it is a folder and never a disk to eject. Every boot but a Ghost one
+        // has it mounted before anyone logs in; there a press is what mounts it, the way a press
+        // mounts a disk that was plugged in
+        let busy = state.working.iter().any(|busy| busy == "exchange");
         rows = rows.push(side_row(
             look,
             "drive-harddisk-symbolic",
             drives::EXCHANGE_NAME.to_string(),
-            under(browser, path),
-            Some(Message::Go(id, Location::Folder(path.clone()))),
+            state
+                .exchange
+                .mount()
+                .is_some_and(|path| under(browser, path)),
+            (!busy).then_some(Message::Do(id, Act::MountExchange)),
         ));
     }
     for drive in &state.drives {

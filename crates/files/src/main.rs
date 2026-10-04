@@ -41,7 +41,7 @@ use rift_ui::{icons, theme, widgets};
 const USAGE: &str = "Usage: rift-files [<folder or file>...] [--screenshot <png>]\n       rift-files [--bus | --set <name> <value> | --state]";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = pretending(std::env::args().skip(1).collect());
     match args
         .iter()
         .map(String::as_str)
@@ -73,6 +73,29 @@ fn main() -> ExitCode {
         }
         paths => open(paths, None),
     }
+}
+
+/// Takes `--as-ghost` off the front and makes this process draw as a Ghost session does: the
+/// drive's own exchange partition listed as a place nothing has mounted. That is how the picture of
+/// the sidebar is taken on a machine that has no Rift drive to boot at all. Only in a debug build:
+/// the image is built in release, where the flag is unknown and the kernel command line stays the
+/// only way a boot is a Ghost one (ADR-0085).
+#[cfg(debug_assertions)]
+fn pretending(args: Vec<String>) -> Vec<String> {
+    match args.split_first() {
+        Some((first, rest)) if first == "--as-ghost" => {
+            librift::ghost::pretend();
+            ui::as_ghost();
+            rest.to_vec()
+        }
+        _ => args,
+    }
+}
+
+/// Every argument, as they were typed.
+#[cfg(not(debug_assertions))]
+fn pretending(args: Vec<String>) -> Vec<String> {
+    args
 }
 
 /// Answer on the session bus with no window open, which is how the bus starts Files for a call to

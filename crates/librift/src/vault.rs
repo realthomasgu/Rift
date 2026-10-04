@@ -1,7 +1,7 @@
 //! Vault from a client's side: the snapshots Timeline keeps of home, the backups on the backup
 //! disk and where they go, making them, restoring a file from one, the boot style on the drive's
-//! esp, which only root can write, whether this machine's tpm opens the drive by itself, and which
-//! security keys open it.
+//! esp, which only root can write, whether this machine's tpm opens the drive by itself, which
+//! security keys open it, and the drive's own exchange partition.
 
 use std::path::{Path, PathBuf};
 #[cfg(feature = "bus")]
@@ -47,6 +47,11 @@ const SEAL_TIMEOUT: Duration = Duration::from_secs(300);
 /// rewrites the metadata and takes its lock.
 #[cfg(feature = "bus")]
 const KEYS_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long reading the drive's table or mounting the exchange partition may take. The mount reads
+/// the file system first, and a unit of Vault's own makes it.
+#[cfg(feature = "bus")]
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(120);
 
 const HOUR: i64 = 3600;
 const DAY: i64 = 24 * HOUR;
@@ -288,6 +293,42 @@ pub fn slots() -> Result<Slots, String> {
         .call("Slots", &())
         .map_err(|e| bus::sentence(vault, e))?;
     Ok(Slots::from_answer(answer))
+}
+
+/// Whether this drive has an exchange partition: the plain one every other computer can read.
+///
+/// Which partition it is is written in the drive's own table and nowhere else, so root reads it and
+/// Vault answers. A caller that finds the partition in the mount table knows it is there already
+/// and has no reason to ask.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, or the drive's table could not be read.
+#[cfg(feature = "bus")]
+pub fn exchange() -> Result<bool, String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(EXCHANGE_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, vault)?;
+    proxy
+        .call("Exchange", &())
+        .map_err(|e| bus::sentence(vault, e))
+}
+
+/// Mounts the drive's exchange partition and answers the folder it is at. One that is mounted
+/// already is left as it is and its folder comes back.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, the drive has none, or the mount failed.
+#[cfg(feature = "bus")]
+pub fn mount_exchange() -> Result<PathBuf, String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(EXCHANGE_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, vault)?;
+    let folder: String = proxy
+        .call("MountExchange", &())
+        .map_err(|e| bus::sentence(vault, e))?;
+    Ok(PathBuf::from(folder))
 }
 
 /// Backs up home now. Returns the backup's id and when it was made.

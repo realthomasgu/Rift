@@ -11,11 +11,16 @@
 //! this machine's tpm holds a key for persist and seal one to it or wipe it, and answer the owner
 //! and root alone too. `SecurityKeys` and `RemoveSecurityKey` say which security keys open persist
 //! and take one off, and answer the owner and root alone as well. Adding one is not here: it needs
-//! a terminal, so `vault enroll-key` does it as root.
+//! a terminal, so `vault enroll-key` does it as root. `Exchange` says whether the drive has an
+//! exchange partition, which is read off its table, and `MountExchange` mounts it; both answer the
+//! owner and root alone too.
 //!
 //! In a Ghost boot persist stays locked and nothing of the drive is mounted, so every one of these
-//! but `Owner` refuses with the one sentence the mode says (ADR-0084). The refusal is here rather
-//! than in each page and command, so there is one place that decides what the drive does not do.
+//! but `Owner`, `Exchange` and `MountExchange` refuses with the one sentence the mode says
+//! (ADR-0084). The refusal is here rather than in each page and command, so there is one place that
+//! decides what the drive does not do. The two about the exchange partition answer there because
+//! the mode's promise is that Rift writes nothing to the drive, not that the owner may not: reading
+//! the table writes nothing, and the mount happens when they ask for it (ADR-0085).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +32,7 @@ use zbus::message::Header;
 
 use crate::backup::Backups;
 use crate::boot::Esp;
+use crate::exchange::Exchange;
 use crate::keys::{Keys, Refusal as KeyRefusal};
 use crate::owner::{self, Owner, Refusal};
 use crate::restore::{self, Account, Outcome, Problem};
@@ -44,6 +50,7 @@ pub struct Vault {
     owner: Arc<Owner>,
     sealed: Arc<Sealed>,
     keys: Arc<Keys>,
+    exchange: Arc<Exchange>,
 }
 
 /// What a method answers with when this boot is a Ghost one: the one sentence the mode says, as
@@ -230,6 +237,51 @@ impl Vault {
             .map_err(fdo::Error::Failed)?;
         println!("vault: the next boot of this drive is {}", wanted.word());
         Ok(())
+    }
+
+    /// Whether this drive has an exchange partition: the plain one Windows, macOS and Linux can
+    /// all read, which a drive is written with or without.
+    ///
+    /// An ordinary boot mounts it before anyone logs in, so Files finds it in the mount table and
+    /// never asks this. A Ghost boot mounts nothing of the drive, so the sidebar needs to be told
+    /// the partition is there before it can offer it, and the only place that is written down is
+    /// the drive's partition table, which is root's to read. Reading it writes nothing, which is
+    /// why this answers in a Ghost boot (ADR-0085).
+    #[zbus(out_args("there"))]
+    async fn exchange(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<bool> {
+        owner_or_root(&header, connection, &self.owner).await?;
+        let exchange = Arc::clone(&self.exchange);
+        blocking::unblock(move || exchange.there())
+            .await
+            .map_err(fdo::Error::Failed)
+    }
+
+    /// Mounts the exchange partition and says where it went, which is what a press on it in Files
+    /// calls. Mounting one that is mounted already says where it is and changes nothing.
+    ///
+    /// A unit of its own does the mount: this service answers the bus inside a mount namespace of
+    /// its own, where a mount would be invisible to the rest of the machine. In a Ghost boot this
+    /// is the one thing that mounts any part of the drive, and it happens because the owner asked.
+    #[zbus(out_args("folder"))]
+    async fn mount_exchange(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<String> {
+        owner_or_root(&header, connection, &self.owner).await?;
+        let exchange = Arc::clone(&self.exchange);
+        blocking::unblock(move || {
+            if !exchange.there()? {
+                return Err("This drive has no exchange partition.".to_string());
+            }
+            crate::exchange::mount_now()
+        })
+        .await
+        .map_err(fdo::Error::Failed)
     }
 
     /// The owner: the account they log in to, the name the lock screen greets them by, and
@@ -560,6 +612,9 @@ pub fn serve(
         owner: Arc::new(Owner::system()),
         sealed: Arc::new(sealed),
         keys: Arc::new(keys),
+        // the one part built here rather than passed in, the way the owner is: every place it
+        // looks is the running drive's own and there is nothing for a caller to choose
+        exchange: Arc::new(Exchange::default()),
     };
     let _connection = zbus::blocking::connection::Builder::system()?
         .name(component.dbus_name())?
