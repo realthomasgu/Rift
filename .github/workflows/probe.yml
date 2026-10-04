@@ -20,45 +20,45 @@ jobs:
         run: |
           set -x
           export PATH=$PWD/fp/bin:$PATH
-          export FLATPAK_SYSTEM_DIR=$RUNNER_TEMP/fsys
-          mkdir -p "$FLATPAK_SYSTEM_DIR"
-          flatpak search --columns=help || true
+          export FLATPAK_USER_DIR=$RUNNER_TEMP/fuser
+          mkdir -p "$FLATPAK_USER_DIR"
+          flatpak search --columns=help anything || true
           flatpak remote-ls --columns=help || true
-          flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           echo "== search with no appstream data"
           time flatpak search vlc | head -n 5 || true
           echo "== remote-ls with names and sizes, no appstream data"
-          time flatpak remote-ls --system --app --columns=application,name,description,installed-size flathub | head -n 5 || true
+          time flatpak remote-ls --user --app --columns=application,name,description,installed-size flathub | head -n 5 || true
           echo "== the appstream pull"
-          time flatpak update --system --appstream -y || true
-          du -sh "$FLATPAK_SYSTEM_DIR"/appstream* 2>/dev/null || true
-          find "$FLATPAK_SYSTEM_DIR" -maxdepth 3 -name 'appstream*' | head
+          time flatpak update --user --appstream -y || true
+          du -sh "$FLATPAK_USER_DIR"/appstream* 2>/dev/null || true
+          find "$FLATPAK_USER_DIR" -maxdepth 3 -name 'appstream*' | head
           echo "== search after it"
           time flatpak search vlc | head -n 5 || true
           flatpak search --columns=application,name,description,installed-size,remotes vlc | head -n 5 || true
           echo "== one app with nothing installed"
-          flatpak remote-info --system flathub org.videolan.VLC || true
+          flatpak remote-info --user flathub org.videolan.VLC || true
           echo "== its metadata"
-          flatpak remote-info --system --show-metadata flathub org.videolan.VLC || true
+          flatpak remote-info --user --show-metadata flathub org.videolan.VLC || true
           echo "== remote-ls with names after the pull"
-          flatpak remote-ls --system --app --columns=application,name,description,installed-size flathub | head -n 5 || true
+          flatpak remote-ls --user --app --columns=application,name,description,installed-size flathub | head -n 5 || true
       - name: The test's repository, as it is and with a metainfo file
         run: |
           set -x
           export PATH=$PWD/fp/bin:$PATH
-          export FLATPAK_SYSTEM_DIR=$RUNNER_TEMP/fsys2
-          mkdir -p "$FLATPAK_SYSTEM_DIR"
+          export FLATPAK_USER_DIR=$RUNNER_TEMP/fuser2
+          mkdir -p "$FLATPAK_USER_DIR"
           ls test-flatpak/repo/refs/heads || true
           find test-flatpak/repo/refs -type f | head -n 20
-          flatpak remote-add --system --no-gpg-verify rift-test "file://$PWD/test-flatpak/repo"
-          flatpak remote-ls --system --app --columns=application,name,description,installed-size rift-test || true
+          flatpak remote-add --user --no-gpg-verify rift-test "file://$PWD/test-flatpak/repo"
+          flatpak remote-ls --user --app --columns=application,name,description,installed-size rift-test || true
           echo "== search for it"
           flatpak search TestApp || true
-          flatpak update --system --appstream -y || true
+          flatpak update --user --appstream -y || true
           flatpak search TestApp || true
           echo "== its metadata, which is where the permissions are"
-          flatpak remote-info --system --show-metadata rift-test dev.rift.TestApp || true
-          flatpak remote-info --system rift-test dev.rift.TestApp || true
+          flatpak remote-info --user --show-metadata rift-test dev.rift.TestApp || true
+          flatpak remote-info --user rift-test dev.rift.TestApp || true
 
           echo "=== now one with a metainfo file of its own"
           export HOME=$RUNNER_TEMP/home
@@ -108,17 +108,17 @@ jobs:
           flatpak build-export --disable-fsync probe-repo probe test
           flatpak build-update-repo probe-repo
           find probe-repo/refs -type f | head -n 20
-          export FLATPAK_SYSTEM_DIR=$RUNNER_TEMP/fsys3
-          mkdir -p "$FLATPAK_SYSTEM_DIR"
-          flatpak remote-add --system --no-gpg-verify probe "file://$PWD/probe-repo"
+          export FLATPAK_USER_DIR=$RUNNER_TEMP/fuser3
+          mkdir -p "$FLATPAK_USER_DIR"
+          flatpak remote-add --user --no-gpg-verify probe "file://$PWD/probe-repo"
           echo "== remote-ls before any appstream pull"
-          flatpak remote-ls --system --app --columns=application,name,description,installed-size probe || true
+          flatpak remote-ls --user --app --columns=application,name,description,installed-size probe || true
           echo "== search before any appstream pull"
           flatpak search ProbeApp || true
           flatpak search probe || true
           echo "== after the pull"
-          flatpak update --system --appstream -y || true
+          flatpak update --user --appstream -y || true
           flatpak search ProbeApp || true
           flatpak search --columns=application,name,description,installed-size,remotes probe || true
-          flatpak remote-ls --system --app --columns=application,name,description,installed-size probe || true
-          flatpak remote-info --system --show-metadata probe dev.rift.ProbeApp || true
+          flatpak remote-ls --user --app --columns=application,name,description,installed-size probe || true
+          flatpak remote-info --user --show-metadata probe dev.rift.ProbeApp || true
