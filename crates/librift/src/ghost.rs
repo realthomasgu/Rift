@@ -36,8 +36,19 @@ pub const SHORT: &str = "Nothing is kept";
 /// has no such word, so this is false everywhere else, which is what every caller wants.
 #[must_use]
 pub fn on() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| names(&fs::read_to_string(CMDLINE).unwrap_or_default()))
+}
+
+/// The answer, read once and remembered.
+static ON: OnceLock<bool> = OnceLock::new();
+
+/// Makes this process answer as though it had booted in Ghost mode, which is how a page is drawn
+/// for a picture on a machine that cannot boot a Rift drive at all. It has to be called before
+/// anything else asks, and it is only in a debug build: the image is built in release, so nothing
+/// on the drive carries it and the kernel command line stays the only way a boot is a Ghost one.
+#[cfg(debug_assertions)]
+pub fn pretend() {
+    let _ = ON.set(true);
 }
 
 /// Whether a kernel command line names the word. The word itself, not a prefix of a longer one:
@@ -61,6 +72,19 @@ pub fn names(cmdline: &str) -> bool {
 #[must_use]
 pub fn cannot(what: &str) -> String {
     format!("{what} in {NAME}: persist stays locked and nothing is written to the drive.")
+}
+
+/// One sentence for something that does work in Ghost mode and goes when the machine does. `what`
+/// is what can be done, as a sentence with no full stop: "A size can be set for this session".
+///
+/// A setting kept under home is one of these: home is memory here, so it holds for the login and
+/// is not on the drive afterwards. A page or a command says this where it would otherwise say
+/// nothing and leave a person thinking a choice had been written down.
+#[must_use]
+pub fn not_kept(what: &str) -> String {
+    format!(
+        "{what}. In {NAME} nothing is kept: everything here is in memory until the machine goes off."
+    )
 }
 
 #[cfg(test)]
@@ -92,6 +116,16 @@ mod tests {
             "{said}"
         );
         assert!(said.ends_with('.'));
+        let for_now = not_kept("A size can be set for this session");
+        assert!(
+            for_now
+                .starts_with("A size can be set for this session. In Ghost mode nothing is kept:"),
+            "{for_now}"
+        );
+        assert!(for_now.ends_with('.'));
+        for sentence in [NAME, SENTENCE, SHORT, &said, &for_now] {
+            assert!(sentence.is_ascii(), "{sentence}");
+        }
     }
 
     #[test]

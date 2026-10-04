@@ -7,6 +7,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::ghost;
+
 /// The part of the model manifest Quasar reads. Everything else in the file is ignored.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Manifest {
@@ -263,12 +265,38 @@ impl Manifest {
                 chat,
                 reason: format!("tier {tier_name}, running {}", chat.id),
             }),
-            (Some(wanted), None) => Err(format!(
-                "No chat model that fits this machine is on the drive. It needs {}.",
-                wanted.file
-            )),
-            (None, None) => Err("No chat model that fits this machine is on the drive.".into()),
+            (Some(wanted), None) => Err(why_not(ghost::on(), NO_CHAT, || {
+                format!(
+                    "No chat model that fits this machine is on the drive. It needs {}.",
+                    wanted.file
+                )
+            })),
+            (None, None) => Err(why_not(ghost::on(), NO_CHAT, || {
+                "No chat model that fits this machine is on the drive.".into()
+            })),
         }
+    }
+}
+
+/// What a Ghost boot cannot do with a chat model, for the mode's own sentence.
+const NO_CHAT: &str = "No model can answer a question";
+/// The same for the voice.
+const NO_VOICE: &str = "Words cannot be said out loud";
+/// The same for speech.
+const NO_SPEECH: &str = "Speech cannot be written down";
+/// The same for search by meaning.
+const NO_SEARCH: &str = "Search by meaning cannot run";
+
+/// The sentence for a model that is not in the models directory. In Ghost mode the weights are on
+/// the drive and out of reach, because persist stays locked and the models come off it, so saying
+/// the drive has no model would be untrue: the mode is the reason and it says so (ADR-0084).
+/// `missing` is what cannot be done, for the mode's own sentence; `otherwise` is what an ordinary
+/// boot says, which names the file that is wanted.
+fn why_not(in_ghost_mode: bool, missing: &str, otherwise: impl FnOnce() -> String) -> String {
+    if in_ghost_mode {
+        ghost::cannot(missing)
+    } else {
+        otherwise()
     }
 }
 
@@ -295,10 +323,12 @@ impl Manifest {
             .iter()
             .find(|voice| on_drive(&voice.file) && on_drive(&voice.tokens))
             .ok_or_else(|| match self.tts.first() {
-                Some(voice) => format!(
-                    "Saying words out loud needs {}, which is not on the drive.",
-                    voice.file
-                ),
+                Some(voice) => why_not(ghost::on(), NO_VOICE, || {
+                    format!(
+                        "Saying words out loud needs {}, which is not on the drive.",
+                        voice.file
+                    )
+                }),
                 None => "The model manifest has no voice.".into(),
             })
     }
@@ -314,10 +344,12 @@ impl Manifest {
             .iter()
             .find(|model| on_drive(&model.file))
             .ok_or_else(|| match self.speech.first() {
-                Some(model) => format!(
-                    "Turning speech into words needs {}, which is not on the drive.",
-                    model.file
-                ),
+                Some(model) => why_not(ghost::on(), NO_SPEECH, || {
+                    format!(
+                        "Turning speech into words needs {}, which is not on the drive.",
+                        model.file
+                    )
+                }),
                 None => "The model manifest has no speech model.".into(),
             })
     }
@@ -333,10 +365,12 @@ impl Manifest {
             .iter()
             .find(|model| on_drive(&model.file))
             .ok_or_else(|| match self.embedding.first() {
-                Some(model) => format!(
-                    "Search by meaning needs {}, which is not on the drive.",
-                    model.file
-                ),
+                Some(model) => why_not(ghost::on(), NO_SEARCH, || {
+                    format!(
+                        "Search by meaning needs {}, which is not on the drive.",
+                        model.file
+                    )
+                }),
                 None => "The model manifest has no embedding model.".into(),
             })
     }
@@ -344,6 +378,25 @@ impl Manifest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_model_that_is_not_there_says_the_file_or_the_mode() {
+        let ordinary = super::why_not(false, "No model can answer a question", || {
+            "No chat model that fits this machine is on the drive. It needs small.gguf.".into()
+        });
+        assert_eq!(
+            ordinary,
+            "No chat model that fits this machine is on the drive. It needs small.gguf."
+        );
+        let ghost = super::why_not(true, "No model can answer a question", || {
+            unreachable!("the file is not named in Ghost mode: the drive is locked, not empty")
+        });
+        assert_eq!(
+            ghost,
+            "No model can answer a question in Ghost mode: persist stays locked and nothing is \
+             written to the drive."
+        );
+    }
+
     use super::*;
 
     const SAMPLE: &str = r#"
