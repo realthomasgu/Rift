@@ -7,9 +7,12 @@
 # the two entries share a kernel, an initrd and a store, and differ by one word. the ghost profile
 # takes over .cmdline alone, with rift.ghost and rd.luks=0 on the end of it.
 #
-# rift.ghost is the word everything of Rift's reads. rd.luks=0 is systemd's own switch for the
-# generator that would otherwise make the unit that opens persist: with it there is no such unit,
-# so nothing asks for the passphrase and nothing touches the header.
+# rift.ghost is the word everything of Rift's reads. The rest of the words are systemd's own
+# switches, and they are there because a condition on a unit cannot do this job: systemd reads a
+# unit's conditions when it starts it, which is after its dependencies are satisfied, so a mount
+# that is skipped has already had a job enqueued for the device it names. Persist is never opened
+# in a ghost boot, so that device never appears, and the boot would end in emergency mode ninety
+# seconds later. Only the command line can keep a unit out of the transaction in the first place.
 {
   config,
   lib,
@@ -22,8 +25,27 @@ let
   # the command line the base profile gets, the way nix/image's verity store builds it. the usrhash
   # is only known once the store's hash tree is built, so both profiles are written in one go
   cmdline = "init=${config.system.build.toplevel}/init ${toString config.boot.kernelParams}";
-  # and the words that make a boot a ghost one
-  words = "rift.ghost rd.luks=0";
+  # and the words that make a boot a ghost one.
+  #
+  # rd.luks=0 turns off the generator that would make the unit that opens persist, so nothing asks
+  # for the passphrase and nothing touches the header. The two masks keep the initrd from waiting
+  # for /dev/mapper/persist: the mounts that come off it are Requires= of initrd-fs.target, which
+  # systemd's own initrd.target only Wants=, and a masked unit in a Wants= is ignored where one in
+  # a Requires= fails the whole transaction. initrd-parse-etc.service is masked with it because it
+  # runs systemd-sysroot-fstab-check, which asks for initrd-fs.target by name and carries
+  # OnFailure=emergency.target. The mounts on the other side of the switch are masked one by one:
+  # nothing requires them there once the initrd has not mounted them, but Vault, Orbit and Quasar
+  # each name a path on persist in RequiresMountsFor=, and a masked unit makes them fail at once
+  # instead of waiting ninety seconds for a device that is not coming
+  words = lib.concatStringsSep " " (
+    [
+      "rift.ghost"
+      "rd.luks=0"
+      "rd.systemd.mask=initrd-fs.target"
+      "rd.systemd.mask=initrd-parse-etc.service"
+    ]
+    ++ map (name: "systemd.mask=${name}.mount") persistMounts
+  );
 
   # the base profile names itself and nothing else: with no TITLE the menu line stays the drive's
   # own name, "Rift <version>", which is what an ordinary boot should look like
@@ -34,8 +56,8 @@ let
     TITLE=Ghost mode
   '';
 
-  # the mounts that come off persist, under /sysroot in the initrd and at their own names after the
-  # switch. a ghost boot has none of them: each one is a directory on the root tmpfs instead
+  # the mounts that come off persist, at their own names on the other side of the switch. a ghost
+  # boot has none of them: each one is a directory on the root tmpfs instead
   persistMounts = [
     "persist"
     "home"
@@ -45,13 +67,14 @@ let
     "var-lib-rift-hosts"
   ];
 
-  # the drop-in that keeps a unit out of a ghost boot. one condition is the whole of what a unit
-  # has to know about the mode
+  # the drop-in that keeps a unit out of a ghost boot. it works for these three because none of them
+  # is required by anything: a condition is read late, so it can skip a unit but never stop one
+  # being pulled in
   skipped = ''
     [Unit]
     ConditionKernelCommandLine=!rift.ghost
   '';
-  # for the units nothing else of Rift's defines: the mounts a generator makes, and systemd's own
+  # for the units nothing else of Rift's defines: /boot, which a generator makes, and systemd's own
   skip =
     names:
     lib.listToAttrs (
@@ -113,10 +136,11 @@ in
     # id, which systemd reads through /etc/machine-id before any unit runs, and because a service
     # with ReadWritePaths= for a directory that is not there fails to start. each one is empty,
     # which is what a ghost boot has in place of what the drive keeps
+    # it hangs off initrd.target and not initrd-fs.target, which a ghost boot masks
     services.ghost-mode = {
       description = "Ghost mode: the empty places of a locked persist";
-      wantedBy = [ "initrd-fs.target" ];
-      before = [ "initrd-fs.target" ];
+      wantedBy = [ "initrd.target" ];
+      before = [ "initrd-cleanup.service" ];
       after = [ "sysroot.mount" ];
       unitConfig = {
         ConditionKernelCommandLine = "rift.ghost";
@@ -132,27 +156,22 @@ in
       };
     };
 
-    # and nothing that reads or writes persist happens: vault-first-boot would make one on a drive
-    # without it, and the mounts would wait for a mapper device that is never opened
+    # and nothing makes a persist either: vault-first-boot would make one on a drive without it.
+    # Nothing requires this service, so a condition is enough to keep it out
     services.vault-first-boot.unitConfig.ConditionKernelCommandLine = "!rift.ghost";
-    units = skip (map (name: "sysroot-${name}.mount") persistMounts);
   };
 
-  # the same mounts on the other side of the switch: nixos puts every file system in /etc/fstab, so
-  # the ones that were skipped in the initrd would be tried again here
-  systemd.units = skip (
-    map (name: "${name}.mount") persistMounts
-    ++ [
-      # blessing a version is a statement about the drive, and a ghost boot makes none. systemd-boot
-      # still takes a try off the counter before the kernel starts, which is the firmware's own write
-      # and the one thing a ghost boot cannot stop
-      "systemd-bless-boot.service"
-      # the esp is not mounted at all: it is the one part of the drive that is not encrypted, and a
-      # vfat mounted for writing is written whether anything writes to it or not
-      "boot.mount"
-      "boot.automount"
-    ]
-  );
+  systemd.units = skip [
+    # blessing a version is a statement about the drive, and a ghost boot makes none. systemd-boot
+    # still takes a try off the counter before the kernel starts, which is the firmware's own write
+    # and the one thing a ghost boot cannot stop
+    "systemd-bless-boot.service"
+    # the esp is not mounted at all: it is the one part of the drive that is not encrypted, and a
+    # vfat mounted for writing is written whether anything writes to it or not. /boot is nofail and
+    # an automount, so nothing requires either of these and the condition does keep them out
+    "boot.mount"
+    "boot.automount"
+  ];
 
   # it writes a fresh seed onto the esp and a token into the machine's own variables
   systemd.services.systemd-boot-random-seed.unitConfig.ConditionKernelCommandLine = "!rift.ghost";
