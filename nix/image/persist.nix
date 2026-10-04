@@ -15,6 +15,12 @@ let
     "ssd"
     "discard=async"
     "commit=15"
+    # nothing mounts these by itself. systemd's fstab generator writes no target symlink at all for
+    # a noauto mount, which is what keeps a ghost boot from waiting ninety seconds for a mapper
+    # device that is never opened: a condition on a mount is read too late to stop that, since
+    # conditions come after a unit's dependencies (ADR-0082). rift-persist.service in the initrd
+    # starts them on every other boot, and they come through the switch already mounted
+    "noauto"
   ];
   subvol = name: {
     device = "/dev/mapper/persist";

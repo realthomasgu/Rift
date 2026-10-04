@@ -7,12 +7,13 @@
 # the two entries share a kernel, an initrd and a store, and differ by one word. the ghost profile
 # takes over .cmdline alone, with rift.ghost and rd.luks=0 on the end of it.
 #
-# rift.ghost is the word everything of Rift's reads. The rest of the words are systemd's own
-# switches, and they are there because a condition on a unit cannot do this job: systemd reads a
-# unit's conditions when it starts it, which is after its dependencies are satisfied, so a mount
-# that is skipped has already had a job enqueued for the device it names. Persist is never opened
-# in a ghost boot, so that device never appears, and the boot would end in emergency mode ninety
-# seconds later. Only the command line can keep a unit out of the transaction in the first place.
+# rift.ghost is the word everything of Rift's reads. A condition cannot do the job on its own:
+# systemd reads a unit's conditions when it starts it, which is after its dependencies are
+# satisfied, so a mount that is going to be skipped has already had a job enqueued for the device it
+# names. Persist is never opened in a ghost boot, so that device never appears and the boot would
+# end in emergency mode ninety seconds later. The mounts that come off persist are noauto instead
+# (nix/image/persist.nix), so nothing pulls them in at all, and rift-persist.service below starts
+# them on every boot that is not a ghost one.
 {
   config,
   lib,
@@ -28,21 +29,14 @@ let
   # and the words that make a boot a ghost one.
   #
   # rd.luks=0 turns off the generator that would make the unit that opens persist, so nothing asks
-  # for the passphrase and nothing touches the header. The two masks keep the initrd from waiting
-  # for /dev/mapper/persist: the mounts that come off it are Requires= of initrd-fs.target, which
-  # systemd's own initrd.target only Wants=, and a masked unit in a Wants= is ignored where one in
-  # a Requires= fails the whole transaction. initrd-parse-etc.service is masked with it because it
-  # runs systemd-sysroot-fstab-check, which asks for initrd-fs.target by name and carries
-  # OnFailure=emergency.target. The mounts on the other side of the switch are masked one by one:
-  # nothing requires them there once the initrd has not mounted them, but Vault, Orbit and Quasar
+  # for the passphrase and nothing touches the header. The masks are for the other side of the
+  # switch: the mounts are noauto there too, so nothing requires them, but Vault, Orbit and Quasar
   # each name a path on persist in RequiresMountsFor=, and a masked unit makes them fail at once
   # instead of waiting ninety seconds for a device that is not coming
   words = lib.concatStringsSep " " (
     [
       "rift.ghost"
       "rd.luks=0"
-      "rd.systemd.mask=initrd-fs.target"
-      "rd.systemd.mask=initrd-parse-etc.service"
     ]
     ++ map (name: "systemd.mask=${name}.mount") persistMounts
   );
@@ -56,8 +50,8 @@ let
     TITLE=Ghost mode
   '';
 
-  # the mounts that come off persist, at their own names on the other side of the switch. a ghost
-  # boot has none of them: each one is a directory on the root tmpfs instead
+  # the mounts that come off persist, under /sysroot in the initrd and at their own names after the
+  # switch. a ghost boot has none of them: each one is a directory on the root tmpfs instead
   persistMounts = [
     "persist"
     "home"
@@ -153,6 +147,28 @@ in
         ExecStart = [
           "/bin/mkdir -p /sysroot/home /sysroot/persist /sysroot/var/lib/rift/hosts /sysroot/var/lib/rift/models /sysroot/var/lib/flatpak"
         ];
+      };
+    };
+
+    # what mounts persist's subvolumes on every boot that is not a ghost one. They are noauto, so
+    # nothing else pulls them in, and this is the one place a condition does the job: an ExecStart
+    # only runs when the condition passes, where a dependency is enqueued whether it passes or not.
+    # initrd-fs.target requires this service, so a mount that fails still stops the boot
+    services.rift-persist = {
+      description = "Mount what persist keeps";
+      requiredBy = [ "initrd-fs.target" ];
+      before = [ "initrd-fs.target" ];
+      after = [ "cryptsetup.target" ];
+      unitConfig = {
+        ConditionKernelCommandLine = "!rift.ghost";
+        DefaultDependencies = false;
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "/bin/systemctl start ${
+          lib.concatMapStringsSep " " (name: "sysroot-${name}.mount") persistMounts
+        }";
       };
     };
 
