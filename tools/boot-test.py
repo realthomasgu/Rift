@@ -178,6 +178,7 @@ import os
 import re
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -2302,6 +2303,8 @@ def main():
         kept_words = "written before ghost mode"
         ghost_words = "written in ghost mode"
         machine_id = r"^\s*([0-9a-f]{32})\s*$"
+        # the drive is counted a mebibyte at a time, so a write can be named by where it landed
+        SLICE = 1 << 20
 
         def one_line(command, what, pattern):
             status, output = run(command, what)
@@ -2314,28 +2317,32 @@ def main():
             status, output = run(f"cat {path}", f"what is in {path}")
             return without_console(output) if status == 0 else f"nothing, cat exited with {status}"
 
-        def drive_bytes(what):
-            """The sha256 of the whole drive file, and one of each gibibyte of it. A boot that
-            writes a byte anywhere on the drive, in the esp, in a boot counter or in the header of
-            persist, changes the first; the second says which part of the drive it was, since the
-            esp is the first gibibyte after the partition table."""
-            whole = hashlib.sha256()
-            parts = []
-            part = hashlib.sha256()
-            read = 0
+        def drive_slices(what):
+            """A sha256 of every mebibyte of the drive, so a boot that writes anywhere on it can be
+            pointed at the place it wrote."""
+            found = []
             with open(kept, "rb") as drive_file:
-                for block in iter(lambda: drive_file.read(4 << 20), b""):
-                    whole.update(block)
-                    part.update(block)
-                    read += len(block)
-                    if read >= 1 << 30:
-                        parts.append(part.hexdigest())
-                        part = hashlib.sha256()
-                        read = 0
-            parts.append(part.hexdigest())
-            said = whole.hexdigest()
-            print(f"\nboot-test: the drive is {said} {what}, at {since()}", flush=True)
-            return said, parts
+                for block in iter(lambda: drive_file.read(SLICE), b""):
+                    found.append(hashlib.sha256(block).hexdigest())
+            print(f"\nboot-test: counted {len(found)} mebibytes of the drive {what}, at {since()}",
+                  flush=True)
+            return found
+
+        def esp_slices():
+            """Which mebibytes of the drive the esp is, read off its own partition table. The esp is
+            the one part a ghost boot is allowed to change: systemd-boot writes to that file system
+            before the kernel starts, to take a try off a boot counter and for its own bookkeeping,
+            and that is the firmware's write and not the session's."""
+            out = subprocess.run(["sfdisk", "--json", kept], capture_output=True, text=True)
+            if out.returncode != 0:
+                fail(f"sfdisk could not read the drive's partition table: {out.stderr.strip()!r}")
+            table = json.loads(out.stdout)["partitiontable"]
+            sector = table.get("sectorsize", 512)
+            esp = next((p for p in table["partitions"] if p.get("name") == "esp"), None)
+            if not esp:
+                fail(f"the drive has no partition called esp: {table.get('partitions')}")
+            start, size = esp["start"] * sector, esp["size"] * sector
+            return start // SLICE, (start + size - 1) // SLICE
 
         def waiting(seconds, ready):
             """Poll until ready() answers something, or give up and answer what it last said."""
@@ -2431,7 +2438,7 @@ def main():
         ok("the first boot was blessed, so the uki on the esp has no counter left to write")
         power_off()
 
-        before, before_parts = drive_bytes("before the ghost boot")
+        before = drive_slices("before the ghost boot")
 
         # and now the ghost entry, picked out of the menu systemd-boot draws for three seconds
         boot_kept("the ghost entry", os.path.join(work, "qmp-ghost.sock"), ghost=True,
@@ -2502,12 +2509,22 @@ def main():
         ok(f"{GHOST_LETTER} is in the ghost session's home")
         power_off()
 
-        after, after_parts = drive_bytes("after the ghost boot")
-        if after != before:
-            changed = [n for n, (was, now) in enumerate(zip(before_parts, after_parts)) if was != now]
-            fail(f"the ghost boot changed the drive: it was {before} and is {after}, in gibibyte "
-                 f"{changed} of it, where 0 holds the partition table and the esp")
-        ok("the ghost boot changed not one byte of the drive")
+        after = drive_slices("after the ghost boot")
+        first, last = esp_slices()
+        if len(before) != len(after):
+            fail(f"the drive was {len(before)} mebibytes before the ghost boot and is {len(after)}")
+        changed = [n for n, (was, now) in enumerate(zip(before, after)) if was != now]
+        outside = [n for n in changed if not first <= n <= last]
+        if changed:
+            print(f"\nboot-test: the mebibytes that changed are {changed[:20]}"
+                  f"{' and more' if len(changed) > 20 else ''}, and the esp is {first} to {last}",
+                  flush=True)
+        if outside:
+            fail(f"the ghost boot wrote to {len(outside)} mebibytes of the drive outside the esp, "
+                 f"at {outside[:10]}, where 0 is the partition table and everything after the esp "
+                 f"is the store, persist and the exchange partition")
+        ok(f"the ghost boot wrote nothing to the drive but {len(changed)} mebibytes of the esp, "
+           f"which the firmware writes before the kernel starts")
 
         # and the ordinary entry again: the ghost session left nothing, and persist still opens
         boot_kept("the ordinary entry again", os.path.join(work, "qmp-after.sock"))
@@ -2862,6 +2879,8 @@ def main():
     if args.first_boot:
         uuid = r"^\s*([0-9a-fA-F-]{36})\s*$"
         machine_id = r"^\s*([0-9a-f]{32})\s*$"
+        # the drive is counted a mebibyte at a time, so a write can be named by where it landed
+        SLICE = 1 << 20
 
         def one_line(command, what, pattern):
             status, output = run(command, what)
