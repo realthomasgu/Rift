@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Probe: boot one drive as a ghost boot several times, each with different words on the kernel
-command line, and say how far each one got.
+"""Probe: what a ghost boot of the image main already built says about itself today.
 
-The drive is written once and kept, then booted again and again with --image, the way boot-test's
-tpm run does. The words go in through systemd-stub's SMBIOS string, so nothing is rebuilt.
+The drive is written once and booted ordinarily, so persist exists and the first boot's questions
+are answered, then booted again as a ghost boot. The ghost words go in through systemd-stub's
+SMBIOS string, so nothing is rebuilt, and they are exactly what nix/image/ghost.nix puts on the
+ghost profile's command line.
 
-Each boot is read for three things: the shell prompt (it worked), the passphrase prompt (persist
-was opened, which a ghost boot must not do) and emergency mode (what happens today).
+What it asks the ghost session is below in QUESTIONS: which units failed, whether Orbit, Quasar and
+Vault are on the bus at all, what the rift command says, what the shell and Settings print about
+themselves, and whether the drive's own exchange partition shows up as a disk a person could mount.
+Every answer is printed with its question, so one run is a page of what part 2 has to change.
 """
 
 import argparse
 import os
 import re
-import subprocess
 import sys
 import time
 
@@ -21,11 +23,16 @@ import pexpect
 PROMPT = r"rift(\x1b\[[0-9;]*m)*@(\x1b\[[0-9;]*m)*rift"
 PASSPHRASE = r"(?i)passphrase[^\r\n]*:"
 EMERGENCY = r"Reached target emergency\.target|Emergency Mode"
-TIMEDOUT = r"Timed out waiting for device"
+# the markers fish writes around a command, so an answer can be read without the prompt
+COMMAND_START = r"\x1b\]133;C[^\x07\x1b]*(?:\x07|\x1b\\)"
+COMMAND_END = r"\x1b\]133;D;(\d+)(?:\x07|\x1b\\)"
+ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?>=]*[A-Za-z]|\x1b[=>]")
+# the line the firmware prints a fraction of a second before it starts the loader on the esp, and
+# how a vm that never started is told from one that did
+HANDOFF = r"BdsDxe: starting Boot"
+BOOTING = r"rift-vm: booting \S+ as an nvme drive"
 
-# the two words that make a boot a ghost one, from nix/image/ghost.nix
-GHOST = "rift.ghost rd.luks=0"
-# the mounts that come off persist, under /sysroot in the initrd and at their own names after it
+# the words that make a boot a ghost one, from nix/image/ghost.nix
 PERSIST = [
     "persist",
     "home",
@@ -34,31 +41,35 @@ PERSIST = [
     "var-lib-rift-models",
     "var-lib-rift-hosts",
 ]
+GHOST = "rift.ghost rd.luks=0 " + " ".join(f"systemd.mask={name}.mount" for name in PERSIST)
 
-
-def masks(prefix, names):
-    return " ".join(f"{prefix}systemd.mask={name}" for name in names)
-
-
-# what to try, in order. the first is the control: it is what main does today.
-#
-# The last probe found that masking initrd-fs.target, or the mounts under it, both end in emergency
-# mode within seconds: systemd-sysroot-fstab-check asks for initrd-fs.target by name, and it is run
-# by initrd-parse-etc.service, which carries OnFailure=emergency.target. Nothing requires that
-# service, so masking it as well should leave the initrd with nothing to say about persist at all.
-# rd.systemd.wants= stands in for the one change this cannot test from the command line: in the real
-# thing ghost-mode.service hangs off initrd.target instead of the target that is now masked
-INITRD = (
-    "rd.systemd.mask=initrd-fs.target rd.systemd.mask=initrd-parse-etc.service "
-    "rd.systemd.wants=ghost-mode.service"
-)
-TRIES = [
-    ("as it is today", GHOST),
-    ("the initrd told to leave persist alone", f"{GHOST} {INITRD}"),
-    (
-        "and each mount masked on the other side of the switch",
-        f"{GHOST} {INITRD} " + masks("", [f"{name}.mount" for name in PERSIST]),
-    ),
+# what to ask the ghost session, in order. each is a command line for the serial shell
+QUESTIONS = [
+    "cat /proc/cmdline",
+    "systemctl --failed --no-pager --no-legend | cat",
+    "systemctl is-active orbit.service quasar.service vault.service vault-owner.service | cat",
+    "systemctl show -p Result -p ActiveState -p ConditionResult orbit.service quasar.service vault.service | cat",
+    "journalctl -b --no-pager -o cat -u orbit.service -u quasar.service -u vault.service -n 40 | cat",
+    "busctl list --no-pager --acquired | grep -i rift | cat",
+    "rift doctor; echo status=$status",
+    "rift host; echo status=$status",
+    "rift ai --help | head -20; echo status=$status",
+    "rift ai ask 'hello'; echo status=$status",
+    "rift snapshot list; echo status=$status",
+    "rift backup list; echo status=$status",
+    "rift update; echo status=$status",
+    "rift session; echo status=$status",
+    "rift --version",
+    "ls -a /home/rift | cat",
+    "lsblk -o NAME,LABEL,PARTLABEL,SIZE,MOUNTPOINT | cat",
+    "ps -eo comm | sort -u | grep -iE 'welcome|lens|horizon|quasar|orbit|vault' | cat",
+    "lens --state; echo status=$status",
+    "systemd-run --user --quiet --collect rift-settings; sleep 25; rift-settings --state; echo status=$status",
+    "rift-settings --page owner; sleep 5; rift-settings --state | head -40; echo status=$status",
+    "systemd-run --user --quiet --collect rift-files; sleep 20; rift-files --state; echo status=$status",
+    "rift-welcome --state; echo status=$status",
+    "free -m | cat",
+    "findmnt --real -o TARGET,SOURCE,FSTYPE | cat",
 ]
 
 
@@ -68,8 +79,8 @@ def main():
     ap.add_argument("image")
     ap.add_argument("passfile")
     ap.add_argument("--log", default="ghost-probe.log")
-    ap.add_argument("--seconds", type=int, default=300, help="how long each boot gets")
-    ap.add_argument("--write-seconds", type=int, default=1200,
+    ap.add_argument("--seconds", type=int, default=420, help="how long a boot gets to reach a shell")
+    ap.add_argument("--write-seconds", type=int, default=1500,
                     help="how long the first one gets, since it writes the drive first")
     args = ap.parse_args()
 
@@ -88,6 +99,7 @@ def main():
     sys.stdout = Tee()
 
     kept = os.path.abspath("ghost-drive.img")
+    passphrase = open(args.passfile).read().strip()
     base = [
         os.path.abspath(args.vm),
         "-smp", "2",
@@ -99,61 +111,85 @@ def main():
         "-no-reboot",
         "-nic", "none",
     ]
-
-    # the drive is written once, with a persist of its own, and every boot after that is the same
-    # drive. the first boot is an ordinary one, to prove the drive is good
     first = [base[0], "--image", os.path.abspath(args.image), "--persist",
              os.path.abspath(args.passfile), "--drive", kept, "--exchange", "1G"] + base[1:]
-    found = {}
-    for name, words in [("an ordinary boot, to prove the drive", None)] + TRIES:
-        # a boot that says nothing at all after the firmware hands over is the hang this vm has
-        # about once in five boots, and it is not an answer to anything. It is tried again, and the
-        # drive is written only the first time
-        for attempt in range(1, 4):
-            written = words is None and attempt == 1
-            if written:
-                cmd = first
-            else:
-                cmd = [base[0], "--image", kept] + base[1:]
-                if words:
-                    cmd += ["-smbios",
-                            f"type=11,value=io.systemd.stub.kernel-cmdline-extra={words}"]
-            print(f"\n==== {name}, try {attempt}\n==== {' '.join(cmd)}", flush=True)
-            child = pexpect.spawn(cmd[0], cmd[1:], encoding="utf-8", codec_errors="replace",
-                                  dimensions=(40, 160))
-            child.logfile_read = Tee()
-            start = time.monotonic()
-            said = "nothing"
-            seconds = args.write_seconds if written else args.seconds
-            try:
-                which = child.expect([PROMPT, PASSPHRASE, EMERGENCY, TIMEDOUT], timeout=seconds)
-                if which == 1 and words is None:
-                    child.send(open(args.passfile).read() + "\r")
-                    child.expect([PROMPT], timeout=args.seconds)
-                    said = "a shell, after the passphrase"
-                else:
-                    said = ["a shell", "the passphrase prompt", "emergency mode",
-                            "a device that timed out"][which]
-            except pexpect.TIMEOUT:
-                said = f"nothing in {seconds} s"
-            except pexpect.EOF:
-                said = "qemu ended"
-            print(f"\n==== {name}: {said} after {time.monotonic() - start:.0f}s", flush=True)
-            if said.startswith("a shell"):
-                child.send("sudo systemctl poweroff\r")
-                try:
-                    child.expect(pexpect.EOF, timeout=120)
-                except pexpect.TIMEOUT:
-                    pass
-            child.terminate(force=True)
-            time.sleep(2)
-            if not said.startswith("nothing"):
-                break
-        found[name] = said
 
-    print("\n==== how far each one got ====")
-    for name, said in found.items():
-        print(f"{name}: {said}")
+    def spawn(cmd, what, seconds):
+        """Start the vm and wait for the firmware to hand the loader the machine. A boot that says
+        nothing at all is the hang this vm has about once in five boots, so it is started again."""
+        for attempt in range(1, 4):
+            print(f"\n==== {what}, try {attempt}\n==== {' '.join(cmd)}", flush=True)
+            child = pexpect.spawn(cmd[0], cmd[1:], encoding="utf-8", codec_errors="replace",
+                                  dimensions=(40, 200))
+            child.logfile_read = Tee()
+            try:
+                child.expect([BOOTING], timeout=seconds)
+                child.expect([HANDOFF], timeout=240)
+                return child
+            except (pexpect.TIMEOUT, pexpect.EOF):
+                print(f"\n==== {what}: nothing from the firmware, starting it again", flush=True)
+                child.terminate(force=True)
+                time.sleep(2)
+        print(f"\n==== {what}: never started", flush=True)
+        sys.exit(1)
+
+    def shell(child, what, ghost):
+        """Wait for the autologin shell, answering the passphrase prompt when there is one."""
+        which = child.expect([PROMPT, PASSPHRASE, EMERGENCY], timeout=args.seconds)
+        if which == 2:
+            print(f"\n==== {what}: emergency mode", flush=True)
+            sys.exit(1)
+        if which == 1:
+            if ghost:
+                print(f"\n==== {what}: asked for a passphrase, which a ghost boot must not",
+                      flush=True)
+                sys.exit(1)
+            child.send(passphrase + "\r")
+            child.expect([PROMPT], timeout=args.seconds)
+        print(f"\n==== {what}: a shell", flush=True)
+
+    def ask(child, command):
+        """Run one command line in the serial shell and print what it said."""
+        print(f"\n######## {command}", flush=True)
+        child.send(command + "\r")
+        try:
+            child.expect([COMMAND_START], timeout=60)
+            child.expect([COMMAND_END], timeout=240)
+        except (pexpect.TIMEOUT, pexpect.EOF) as why:
+            print(f"\n######## {command}: nothing came back ({type(why).__name__})", flush=True)
+            return
+        said = ESCAPES.sub("", child.before).replace("\r", "")
+        print(f"\n######## {command} said:\n{said.strip()}", flush=True)
+
+    def off(child):
+        child.send("sudo systemctl poweroff\r")
+        try:
+            child.expect(pexpect.EOF, timeout=120)
+        except pexpect.TIMEOUT:
+            child.terminate(force=True)
+        time.sleep(2)
+
+    # the ordinary boot, which writes the drive and makes persist
+    child = spawn(first, "the ordinary boot", args.write_seconds)
+    shell(child, "the ordinary boot", ghost=False)
+    ask(child, "findmnt -no SOURCE,FSTYPE /home")
+    # let the desktop settle, so the ordinary session is the one the ghost one is compared with
+    time.sleep(60)
+    for command in ("rift doctor; echo status=$status", "lens --state; echo status=$status"):
+        ask(child, command)
+    off(child)
+
+    # and the same drive as a ghost boot
+    child = spawn([base[0], "--image", kept] + base[1:]
+                  + ["-smbios", f"type=11,value=io.systemd.stub.kernel-cmdline-extra={GHOST}"],
+                  "the ghost boot", args.seconds)
+    shell(child, "the ghost boot", ghost=True)
+    # the desktop takes a moment, and Settings and Files are started from the shell below
+    time.sleep(90)
+    for command in QUESTIONS:
+        ask(child, command)
+    off(child)
+    print("\n==== done", flush=True)
 
 
 if __name__ == "__main__":

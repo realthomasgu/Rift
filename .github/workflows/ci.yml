@@ -12,9 +12,9 @@ concurrency:
 
 jobs:
   probe:
-    name: what stops the initrd waiting for persist
+    name: what a ghost boot says about itself today
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
       actions: read
@@ -36,7 +36,7 @@ jobs:
       - name: Probe
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash tools/probe-ghost.sh 37109336532
+        run: bash tools/probe-ghost.sh 37184885088
       - uses: actions/upload-artifact@v4
         if: always()
         continue-on-error: true

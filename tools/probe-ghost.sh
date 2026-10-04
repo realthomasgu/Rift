@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
-# Probe: what stops the initrd waiting for /dev/mapper/persist in a ghost boot.
+# Probe: what a ghost boot of the image main already built says about itself today.
 #
-# A ghost boot leaves persist locked, so /dev/mapper/persist never appears, and the mounts that come
-# off it are Requires= of initrd-fs.target: the device job times out after 90 s and the boot ends in
-# emergency mode. A ConditionKernelCommandLine on the mounts does not help, because conditions are
-# checked after a unit's dependencies are satisfied and the device job is enqueued either way.
-#
-# The words rift.ghost and rd.luks=0 are the whole of what makes a boot a ghost one, and
+# The words on the ghost profile's command line are the whole of what makes a boot a ghost one, and
 # systemd-stub takes extra words off a SMBIOS string, so the image main already built can be booted
-# as a ghost boot without building anything. That makes every command line answer cheap to try.
+# as a ghost boot without building anything. One run is a page of what part 2 has to change.
 set -euo pipefail
 
 run=${1:?usage: probe-ghost.sh <run id whose image artifact to boot>}
