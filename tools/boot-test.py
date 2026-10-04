@@ -2530,13 +2530,14 @@ def main():
         ok("persist, the exchange partition and the esp are all unmounted on the ghost boot")
 
         def unit_state(unit):
-            """What systemd says this unit is. The word has to be read on a line of its own:
-            `inactive` has `active` inside it, so a substring reads one for the other."""
+            """What systemd says this unit is. The word has to be read on a line of its own, since
+            `inactive` has `active` inside it and a substring reads one for the other, and with the
+            space around it, since the serial console ends a line with a carriage return too."""
             _, output = run(f"systemctl show -p ActiveState --value {unit} | cat",
                             f"what {unit} is")
-            found = re.search(r"^(in)?active$|^(de)?activating$|^failed$|^reloading$",
+            found = re.search(r"^\s*((?:in)?active|(?:de)?activating|failed|reloading)\s*$",
                               without_console(output), re.M)
-            return found.group(0) if found else None
+            return found.group(1) if found else None
 
         # and neither unit that mounts the exchange partition has run. The one every other boot
         # runs is held out by its own condition; the one the owner's press starts is wanted by
