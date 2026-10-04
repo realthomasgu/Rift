@@ -2754,14 +2754,15 @@ def main():
             moved = [n for n, (then, since) in enumerate(zip(was, now)) if then != since]
             outside = [n for n in moved
                        if not any(low <= n <= high for _, low, high in allowed)]
+            names = " and ".join(f"the {name}" for name, _, _ in allowed)
             ranges = ", ".join(f"the {name} is {low} to {high}" for name, low, high in allowed)
             if moved:
                 print(f"\nboot-test: the mebibytes that changed are {moved[:20]}"
                       f"{' and more' if len(moved) > 20 else ''}, and {ranges}", flush=True)
             if outside:
-                fail(f"{what} wrote to {len(outside)} mebibytes of the drive outside {ranges}, "
-                     f"at {outside[:10]}, where 0 is the partition table and everything after the "
-                     f"esp is the store, persist and the exchange partition")
+                fail(f"{what} wrote to {len(outside)} mebibytes of the drive outside {names}, at "
+                     f"{outside[:10]}, where {ranges}, 0 is the partition table and everything "
+                     f"after the esp is the store, persist and the exchange partition")
             return moved
 
         changed = changes(before, after, [("esp", esp_first, esp_last)], "the ghost boot")
@@ -2808,6 +2809,17 @@ def main():
                     fail(f"Files says {key} {ghost_files_says(key, lines)!r} after {seconds} s, not "
                          f"{value!r}; its state is {lines!r}"[:1200])
                 time.sleep(2)
+
+        # this boot has mounted nothing of its own either, which is what the row has to mean
+        status, output = run(f"findmnt -no SOURCE,FSTYPE --mountpoint {DRIVE_EXCHANGE}",
+                             f"whether {DRIVE_EXCHANGE} is mounted before anything is asked")
+        if status == 0 and without_console(output).strip():
+            fail(f"{DRIVE_EXCHANGE} is mounted on the second ghost boot with nothing asked: "
+                 f"{without_console(output).strip()!r}")
+        for unit in EXCHANGE_UNITS:
+            was = unit_state(unit)
+            if was != "inactive":
+                fail(f"{unit} is {was!r} on the second ghost boot before the press")
 
         run("systemd-run --user --quiet --collect rift-files", "Files in the ghost session")
         ghost_files_until(180, "exchange", "there", "what Files says in a ghost session")
