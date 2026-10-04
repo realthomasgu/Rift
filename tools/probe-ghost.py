@@ -69,6 +69,8 @@ def main():
     ap.add_argument("passfile")
     ap.add_argument("--log", default="ghost-probe.log")
     ap.add_argument("--seconds", type=int, default=300, help="how long each boot gets")
+    ap.add_argument("--write-seconds", type=int, default=1200,
+                    help="how long the first one gets, since it writes the drive first")
     args = ap.parse_args()
 
     log = open(args.log, "w", encoding="utf-8")
@@ -115,19 +117,23 @@ def main():
         child.logfile_read = Tee()
         start = time.monotonic()
         said = "nothing"
+        # the first boot writes the drive with rift-flash before qemu starts, which takes minutes
+        # and comes out of the same budget. a boot killed in the middle of that leaves a half
+        # written drive, and every boot after it on the same drive is answering the wrong question
+        seconds = args.write_seconds if words is None else args.seconds
         try:
             which = child.expect([PROMPT, PASSPHRASE, EMERGENCY, TIMEDOUT],
-                                 timeout=args.seconds)
+                                 timeout=seconds)
             if which == 1 and words is None:
                 # the ordinary boot asks for the passphrase, which is right
                 child.send(open(args.passfile).read() + "\r")
-                child.expect([PROMPT], timeout=args.seconds)
+                child.expect([PROMPT], timeout=seconds)
                 said = "a shell, after the passphrase"
             else:
                 said = ["a shell", "the passphrase prompt", "emergency mode",
                         "a device that timed out"][which]
         except pexpect.TIMEOUT:
-            said = f"nothing in {args.seconds} s"
+            said = f"nothing in {seconds} s"
         except pexpect.EOF:
             said = "qemu ended"
         print(f"\n==== {name}: {said} after {time.monotonic() - start:.0f}s", flush=True)
