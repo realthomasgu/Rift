@@ -17,6 +17,7 @@ mod control;
 mod datetime;
 mod displays;
 mod dock;
+mod ghost;
 mod keyboard;
 mod net;
 mod notifications;
@@ -45,7 +46,7 @@ use rift_ui::{icons, theme, widgets};
 const USAGE: &str = "Usage: rift-settings [--page <name>] [--screenshot <png>]\n       rift-settings [--set <name> <value> | --state]\n       rift-settings --set scale <screen> <1 or 2>";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = pretending(std::env::args().skip(1).collect());
     match args
         .iter()
         .map(String::as_str)
@@ -90,6 +91,27 @@ fn main() -> ExitCode {
         [] => open(None, None),
         [other, ..] => fail(&format!("rift-settings: unknown option {other}\n{USAGE}")),
     }
+}
+
+/// Takes `--as-ghost` off the front and makes this process answer as though it had booted in Ghost
+/// mode, which is how a page of the real app is drawn for a picture of it on a machine that cannot
+/// boot a Rift drive at all. Only in a debug build: the image is built in release, where the flag
+/// is unknown and the kernel command line stays the only way a boot is a Ghost one.
+#[cfg(debug_assertions)]
+fn pretending(args: Vec<String>) -> Vec<String> {
+    match args.split_first() {
+        Some((first, rest)) if first == "--as-ghost" => {
+            librift::ghost::pretend();
+            rest.to_vec()
+        }
+        _ => args,
+    }
+}
+
+/// Every argument, as they were typed.
+#[cfg(not(debug_assertions))]
+fn pretending(args: Vec<String>) -> Vec<String> {
+    args
 }
 
 /// Open the window, or show the page on the one that is already open. A session has one Settings

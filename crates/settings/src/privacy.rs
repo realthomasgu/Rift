@@ -19,6 +19,7 @@ use librift::airlock;
 use librift::privacy::{self, Answer, Security};
 
 use crate::ai::said;
+use crate::ghost;
 use crate::icons;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
@@ -228,12 +229,19 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
         Some("Apps list the files opened lately."),
         switch(look, now.recent, |on| Message::Private(Asked::Recent(on))),
     )];
+    let mut history = column![heading(look, "File history"), group(look, recent)].spacing(8);
+    // the list of files opened lately is under home and the camera's answers are in the portal's
+    // permission store, which is under home too: both are memory in a Ghost boot, so a switch here
+    // holds for this login and is on no drive afterwards (ADR-0084)
+    if ghost::on() {
+        history = history.push(ghost::only_now(look, FILES_FOR_THIS_SESSION));
+    }
     let mut page = column![
         the_camera(state, look, now),
         part(look, "Microphone", MICROPHONE),
         part(look, "Location", LOCATION),
         part(look, "Screen lock", LOCKING),
-        column![heading(look, "File history"), group(look, recent)].spacing(8),
+        history,
         the_network(look, now),
         the_firmware(state, look),
         part(look, "Diagnostics", DIAGNOSTICS),
@@ -277,13 +285,16 @@ fn the_camera<'a>(state: &'a Settings, look: Colors, now: &'a Picture) -> Elemen
             .map(|answer| camera_row(state, look, answer))
             .collect(),
     };
-    column![
+    let mut section = column![
         heading(look, "Camera"),
         group(look, rows),
         note(look, CAMERA)
     ]
-    .spacing(8)
-    .into()
+    .spacing(8);
+    if ghost::on() {
+        section = section.push(ghost::only_now(look, CAMERA_FOR_THIS_SESSION));
+    }
+    section.into()
 }
 
 /// One app's answer: its icon and name from its desktop entry, and the switch.
@@ -415,6 +426,11 @@ fn level_row<'a>(look: Colors, security: &Security) -> Element<'a, Message> {
 /// Under the camera's apps.
 const CAMERA: &str = "An app asks before it takes the camera, and the answer is kept here. Off, \
                       the app is refused without being asked.";
+/// What an answer given in a Ghost boot is, for the camera and for the file history.
+const CAMERA_FOR_THIS_SESSION: &str =
+    "What apps were told before is on the drive, and an app can be answered for this session";
+const FILES_FOR_THIS_SESSION: &str = "This switch is this session's own";
+
 /// What the microphone does.
 const MICROPHONE: &str = "An app reaches the microphone without asking: only a sandbox keeps it \
                           away. The Sound page mutes the microphone for every app.";

@@ -16,6 +16,7 @@ use iced::{Center, Element, Fill, Task};
 use librift::vault::{self, AutoUnlock, SecurityKey};
 
 use crate::ai::said;
+use crate::ghost;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
 use crate::widgets::{action, fact, field, focus, group, heading, note, setting};
@@ -238,14 +239,22 @@ fn steps(name: &str, value: &str) -> Vec<Asked> {
 
 /// The Unlocking part of the page: the passphrase, the tpm and the security keys.
 pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
-    let inside = match &state.unlocking {
-        None => vec![fact(
-            look,
-            "Unlocking",
-            "Asking Vault about the drive.".into(),
-        )],
-        Some(Err(why)) => vec![fact(look, "Unlocking", why.clone())],
-        Some(Ok(drive)) => rows(state, look, drive),
+    let inside = if ghost::on() {
+        // nothing can be sealed to a tpm and no security key can be added or taken off while
+        // persist is locked, and the header is not read to say what is there already either: the
+        // note that says which machine holds a key is on persist, so the answer would be half of
+        // one (ADR-0084)
+        vec![ghost::row(look, "Unlocking", NOT_IN_GHOST_MODE)]
+    } else {
+        match &state.unlocking {
+            None => vec![fact(
+                look,
+                "Unlocking",
+                "Asking Vault about the drive.".into(),
+            )],
+            Some(Err(why)) => vec![fact(look, "Unlocking", why.clone())],
+            Some(Ok(drive)) => rows(state, look, drive),
+        }
     };
     column![
         heading(look, "Unlocking the drive"),
@@ -356,6 +365,8 @@ fn how_many(keys: usize) -> &'static str {
 
 /// What a thread that stopped before it answered says.
 const STOPPED: &str = "It stopped before it finished.";
+/// What a Ghost boot cannot do about what opens the drive.
+const NOT_IN_GHOST_MODE: &str = "What opens the drive cannot be read or changed";
 /// Under the tpm row while a key is sealed to this machine.
 const HERE: &str = "This machine's tpm holds a key for the drive, so the drive starts here with \
                     nothing typed. Somebody who takes both can start it.";

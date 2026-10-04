@@ -15,6 +15,7 @@ use iced::{Border, Center, Color, Element, Fill, Length, Subscription, Task, The
 use librift::apps::App;
 use librift::defaults::{self, Found, Kind, Opens};
 
+use crate::ghost;
 use crate::icons;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
@@ -156,13 +157,19 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
             }
         }
     }
+    let mut defaults = column![
+        heading(look, "Default apps"),
+        group(look, rows),
+        note(look, DEFAULTS)
+    ]
+    .spacing(8);
+    // the owner's own list is a file under home, which is memory in a Ghost boot: a choice made
+    // here opens files for this login and is on no drive afterwards (ADR-0084)
+    if ghost::on() {
+        defaults = defaults.push(ghost::only_now(look, FOR_THIS_SESSION));
+    }
     let mut page = column![
-        column![
-            heading(look, "Default apps"),
-            group(look, rows),
-            note(look, DEFAULTS)
-        ]
-        .spacing(8),
+        defaults,
         column![heading(look, "App permissions"), note(look, PERMISSIONS)].spacing(8),
     ]
     .spacing(GAP)
@@ -261,6 +268,10 @@ fn app_row<'a>(
 const DEFAULTS: &str = "Each kind of file, and each link another app hands on, opens with the app \
                         beside it. Where the drive has more than one app for a kind, press its row \
                         to choose another.";
+/// What a choice made in a Ghost boot is.
+const FOR_THIS_SESSION: &str =
+    "These are the image's own here, and an app can be chosen for this session";
+
 /// What the page cannot do yet.
 const PERMISSIONS: &str = "What each app may reach is not in Settings yet. rift run --sandbox \
                            starts a program that sees only the folder it runs in, and Privacy and \

@@ -29,6 +29,7 @@ use librift::region::Region;
 use librift::sound::{self as sound_picture, Side};
 
 use crate::control::{self, Command};
+use crate::ghost;
 use crate::net::Joining;
 use crate::page::Page;
 use crate::theme::{Colors, colors};
@@ -421,14 +422,19 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
         screenshot: start.screenshot.clone(),
         ..Settings::bare()
     };
-    let mut work = vec![about::ask_orbit(), appearance::ask_vault(), ai::ask()];
+    let mut work = vec![about::ask_orbit(), ai::ask()];
+    // in a Ghost boot persist stays locked and no part of the drive is mounted, so the pages that
+    // would ask Vault for what the drive keeps say the mode instead and ask nothing (ADR-0084)
+    if !ghost::on() {
+        work.push(appearance::ask_vault());
+    }
     if state.page == Page::Search {
         work.push(search::read());
     }
-    if state.page == Page::Backups {
+    if state.page == Page::Backups && !ghost::on() {
         work.push(backups::read());
     }
-    if state.page == Page::Updates {
+    if state.page == Page::Updates && !ghost::on() {
         work.push(updates::read());
     }
     if state.page == Page::Region {
@@ -440,7 +446,7 @@ fn boot(start: &Start) -> (Settings, Task<Message>) {
     if state.page == Page::Privacy {
         work.push(privacy::ask_fwupd());
     }
-    if state.page == Page::Owner {
+    if state.page == Page::Owner && !ghost::on() {
         work.push(owner::read());
         work.push(unlocking::read());
     }
@@ -852,9 +858,9 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
         Page::Search => search::read(),
         // the same for the snapshots, which a timer takes every hour, and the backups, which are
         // on a disk the window would rather not mount before anyone asks for them
-        Page::Backups => backups::read(),
+        Page::Backups if !ghost::on() => backups::read(),
         // and for the slots, since reading them mounts the esp
-        Page::Updates => updates::read(),
+        Page::Updates if !ghost::on() => updates::read(),
         // the language and the formats are part of the image, and asking for them runs programs.
         // the clock and the printers are read by subscriptions of their own, which ask again while
         // their page is up
@@ -893,7 +899,7 @@ fn show(state: &mut Settings, page: Page) -> Task<Message> {
         }
         // the owner's name and password are Vault's to answer, and nothing changes them while the
         // page is up but the page itself, which asks again after each change
-        Page::Owner => Task::batch([owner::read(), unlocking::read()]),
+        Page::Owner if !ghost::on() => Task::batch([owner::read(), unlocking::read()]),
         _ => Task::none(),
     }
 }
@@ -1201,8 +1207,28 @@ fn sidebar(state: &Settings, look: Colors) -> Element<'_, Message> {
             }),
         );
     }
+    // in a Ghost boot every setting the window shows is the image's own, not the owner's, because
+    // what the owner chose is under home and home is memory here. That is one fact about the
+    // window and not about a page, so it is said once, at the foot of the sidebar, in the two
+    // words the bar uses and the short of what they mean (ADR-0084)
+    let side: Element<'_, Message> = if ghost::on() {
+        column![
+            scroll(look, rows).height(Fill),
+            container(
+                column![
+                    text(librift::ghost::NAME).size(TEXT_SIZE).color(look.text),
+                    text(librift::ghost::SHORT).size(TEXT_SIZE).color(look.dim),
+                ]
+                .spacing(2)
+            )
+            .padding([10, 18]),
+        ]
+        .into()
+    } else {
+        scroll(look, rows).height(Fill).into()
+    };
     row![
-        container(scroll(look, rows).height(Fill))
+        container(side)
             .width(Length::Fixed(SIDEBAR))
             .height(Fill)
             .style(move |_: &Theme| fill(look.side)),

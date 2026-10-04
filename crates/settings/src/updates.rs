@@ -16,6 +16,7 @@ use librift::update::{Slot, Slots, where_from};
 use librift::vault;
 
 use crate::ai::said;
+use crate::ghost;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
 use crate::widgets::{GAP, fact, group, heading, note, setting};
@@ -66,6 +67,29 @@ fn or_none(value: &str) -> &str {
 /// The page.
 pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
     let mut page = column![].spacing(GAP).width(Fill);
+    if ghost::on() {
+        // reading the slots means mounting the esp and reading the drive's partition table, and a
+        // Ghost boot mounts no part of the drive, so Vault is not asked and the page says so. An
+        // update cannot be written into the other slot here either (ADR-0084)
+        return page
+            .push(
+                column![
+                    heading(look, "Versions on this drive"),
+                    group(look, vec![ghost::row(look, "Slots", NO_SLOTS)]),
+                    note(look, TWO_SLOTS),
+                ]
+                .spacing(8),
+            )
+            .push(
+                column![
+                    heading(look, "Updates"),
+                    group(look, vec![ghost::row(look, "Installing", NO_UPDATE)]),
+                ]
+                .spacing(8),
+            )
+            .push(firmware(look))
+            .into();
+    }
     match state.slots.as_ref() {
         None => page = page.push(note(look, "Asking Vault what this drive holds.")),
         Some(Err(why)) => {
@@ -191,6 +215,10 @@ const TRIES: &str = "The next boot starts the newest version that still has a tr
 const INSTALLING: &str = "Installing an update is sudo systemd-sysupdate from a terminal for now. \
                           Settings will do it once updates come from a channel with a signature \
                           this drive knows.";
+/// What a Ghost boot cannot do with the drive's slots and an update.
+const NO_SLOTS: &str = "What this drive holds cannot be read";
+const NO_UPDATE: &str = "An update cannot be brought in or installed";
+
 /// Firmware, which fwupd looks after.
 const FIRMWARE: &str = "Firmware is not in Settings yet. fwupdmgr get-updates says what the makers \
                         of this machine have published, and sudo fwupdmgr update installs it.";

@@ -18,6 +18,7 @@ use librift::models::{self, Manifest, Tier};
 use librift::paths;
 use librift::quasar::{self, Status};
 
+use crate::ghost;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
 use crate::widgets::{GAP, TEXT_SIZE, choice, fact, group, heading, note, setting};
@@ -270,6 +271,12 @@ fn sizes<'a>(state: &'a Settings, look: Colors, picture: &'a Picture) -> Element
         ));
     }
     section = section.push(group(look, rows));
+    if ghost::on() {
+        // the size is written into the host profile under /var/lib, which is memory here, and
+        // Quasar picks a model from it the next time it starts, which this session never has
+        // (ADR-0084)
+        return section.push(ghost::only_now(look, FOR_THIS_SESSION)).into();
+    }
     for line in told(picture, set) {
         section = section.push(note(look, line));
     }
@@ -299,6 +306,10 @@ fn told(picture: &Picture, set: Option<Tier>) -> Vec<&'static str> {
     lines
 }
 
+/// What a size chosen in a Ghost boot is, and what the models there are read as.
+const FOR_THIS_SESSION: &str = "A size can be set for this session";
+const NOT_MOUNTED: &str = "The models on the drive cannot be read";
+
 /// What happens when the size changes.
 const WHEN: &str = "Quasar picks a model when it starts, so a size chosen here is the one it picks \
                     the next time it starts. Orbit works a size out from how much memory this \
@@ -309,6 +320,16 @@ const UNTIL: &str = "Quasar is still running the model for the size it started w
 
 /// Every model worth showing, with what it is and whether it is on the drive.
 fn models(look: Colors, picture: &Picture) -> Element<'_, Message> {
+    if ghost::on() {
+        // the models are a mount off persist, so every row would say the model is not on the drive
+        // when it may well be: the drive is locked and the weights are out of reach
+        return column![
+            heading(look, "Models"),
+            group(look, vec![ghost::row(look, "Models", NOT_MOUNTED)]),
+        ]
+        .spacing(8)
+        .into();
+    }
     let running = picture
         .status()
         .map(|status| status.model.trim())

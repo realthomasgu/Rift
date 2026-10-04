@@ -14,6 +14,7 @@ use iced::{Center, Element, Fill, Task};
 use librift::owner::{self as account, Owner};
 
 use crate::ai::said;
+use crate::ghost;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
 use crate::widgets::{
@@ -243,6 +244,9 @@ pub fn state(state: &Settings) -> Vec<String> {
 
 /// The page.
 pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
+    if ghost::on() {
+        return in_ghost_mode(state, look);
+    }
     let answered = match &state.owner {
         None => return note(look, "Asking Vault about the owner."),
         Some(answered) => answered.as_ref(),
@@ -274,6 +278,41 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
         page = page.push(text(why).size(TEXT_SIZE).color(look.error));
     }
     page.into()
+}
+
+/// The page in a Ghost boot. The name and the password are kept on persist, which stays locked, so
+/// each group says the mode where its rows would be and Vault is not asked at all. The session
+/// comes back at no next login either, because the journal is under home and home is memory here.
+/// Automatic login is the one row that reads the same: it is what this boot did.
+fn in_ghost_mode(state: &Settings, look: Colors) -> Element<'_, Message> {
+    column![
+        column![
+            heading(look, "Account"),
+            group(look, vec![ghost::row(look, "Name", NO_NAME)])
+        ]
+        .spacing(8),
+        column![
+            heading(look, "Password"),
+            group(look, vec![ghost::row(look, "Password", NO_PASSWORD)]),
+            note(look, PASSWORD),
+        ]
+        .spacing(8),
+        column![
+            heading(look, "Logging in"),
+            group(
+                look,
+                vec![
+                    setting(look, "Automatic login", Some(AUTOMATIC), said(look, "On")),
+                    ghost::row(look, "Bring the session back", NO_RESTORE),
+                ]
+            ),
+        ]
+        .spacing(8),
+        crate::unlocking::view(state, look),
+    ]
+    .spacing(GAP)
+    .width(Fill)
+    .into()
 }
 
 /// The name with its field and Save, the account's own name, and that it is an administrator.
@@ -413,6 +452,10 @@ fn the_password<'a>(
 
 /// What a thread that stopped before it answered says.
 const STOPPED: &str = "It stopped before it finished.";
+/// What a Ghost boot cannot do with the owner's name, the password, and the session.
+const NO_NAME: &str = "The name the lock screen shows cannot be read or changed";
+const NO_PASSWORD: &str = "The password cannot be changed";
+const NO_RESTORE: &str = "The apps that are open cannot come back at a next login";
 /// Under the name.
 const NAME: &str = "The lock screen shows it above the password.";
 /// Under the account's own name.

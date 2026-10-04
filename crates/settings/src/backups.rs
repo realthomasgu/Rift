@@ -16,6 +16,7 @@ use librift::time;
 use librift::vault::{self, Target};
 
 use crate::ai::said;
+use crate::ghost;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
 use crate::widgets::{GAP, TEXT_SIZE, action, fact, group, heading, note, setting};
@@ -207,6 +208,17 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
 /// The snapshots of home: how many there are, how long ago the newest was taken, and the button
 /// that takes one now.
 fn timeline(state: &Settings, look: Colors) -> Element<'_, Message> {
+    if ghost::on() {
+        // the snapshots are subvolumes of persist, which stays locked, so there is nothing to
+        // count and nothing to take one of: home here is memory (ADR-0084)
+        return column![
+            heading(look, "Snapshots of your home"),
+            group(look, vec![ghost::row(look, "Snapshots", NO_SNAPSHOTS)]),
+            note(look, ON_THIS_DRIVE),
+        ]
+        .spacing(8)
+        .into();
+    }
     let mut rows = Vec::new();
     match state.snapshots.as_ref() {
         None => rows.push(fact(look, "Snapshots", "Asking Vault.".to_string())),
@@ -248,6 +260,16 @@ fn timeline(state: &Settings, look: Colors) -> Element<'_, Message> {
 
 /// The backups on another disk: where they go, what is there, and the button that makes one.
 fn on_a_disk(state: &Settings, look: Colors) -> Element<'_, Message> {
+    if ghost::on() {
+        // the folder backups go to and the password that encrypts them are both on persist, so
+        // there is nothing to list and nothing to back up to
+        return column![
+            heading(look, "Backups on a disk"),
+            group(look, vec![ghost::row(look, "Folder", NO_BACKUPS)]),
+        ]
+        .spacing(8)
+        .into();
+    }
     let mut rows = Vec::new();
     match state.disk.as_deref() {
         None => rows.push(fact(look, "Folder", "Asking Vault.".to_string())),
@@ -304,6 +326,10 @@ fn disk_rows<'a>(state: &'a Settings, look: Colors, disk: &'a Disk) -> Vec<Eleme
     ));
     rows
 }
+
+/// What a Ghost boot cannot do with the snapshots and the backups.
+const NO_SNAPSHOTS: &str = "Timeline snapshots cannot be reached";
+const NO_BACKUPS: &str = "Backups cannot be reached";
 
 /// What a snapshot is and is not.
 const ON_THIS_DRIVE: &str = "Snapshots sit beside your home folder on this drive, so they bring \

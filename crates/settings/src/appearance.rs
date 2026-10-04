@@ -14,6 +14,7 @@ use librift::appearance::{
 };
 use librift::boot::Style;
 
+use crate::ghost;
 use crate::theme::{Colors, hex};
 use crate::ui::{Message, Settings};
 use crate::widgets::{
@@ -225,6 +226,16 @@ fn terminal(state: &Settings, look: Colors) -> Element<'_, Message> {
 /// does not take effect where it stands: plymouth draws the passphrase prompt before persist is
 /// open, so the word lives on the esp and the next boot is the one that draws it.
 fn boot(state: &Settings, look: Colors) -> Element<'_, Message> {
+    if ghost::on() {
+        // the word is on the esp, and a Ghost boot mounts no part of the drive and writes nothing
+        // to it, so there is nothing to read and nothing to choose (ADR-0084)
+        return column![
+            heading(look, "Boot"),
+            group(look, vec![ghost::row(look, "Boot", NO_BOOT_STYLE)]),
+        ]
+        .spacing(8)
+        .into();
+    }
     let chosen = match &state.boot {
         Some(Ok(style)) => Some(*style),
         _ => None,
@@ -251,6 +262,9 @@ fn boot(state: &Settings, look: Colors) -> Element<'_, Message> {
         .spacing(8)
         .into()
 }
+
+/// What a Ghost boot cannot do with the word on the esp.
+const NO_BOOT_STYLE: &str = "How the next boot looks cannot be read or changed";
 
 /// Two letters in a colour scheme, drawn on it: what a terminal in it looks like.
 fn sample<'a>(scheme: Scheme, look: Colors) -> Element<'a, Message> {
