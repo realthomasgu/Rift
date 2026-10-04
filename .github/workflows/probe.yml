@@ -5,70 +5,28 @@ on:
 
 jobs:
   probe:
-    name: What flatpak knows about an app before it is installed
+    name: Appstream data a repository of our own can carry
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/determinate-nix-action@v3
-      - name: The image's own flatpak and the test's repository
+      - name: The image's own flatpak
         run: |
           nix build --inputs-from . nixpkgs#flatpak -o fp -L
-          nix build .#test-flatpak -o test-flatpak -L
           ./fp/bin/flatpak --version
-      - name: Flathub, before and after an appstream pull
+      - name: An app with an app-info file of its own
         run: |
           set -x
           export PATH=$PWD/fp/bin:$PATH
-          export FLATPAK_USER_DIR=$RUNNER_TEMP/fuser
-          mkdir -p "$FLATPAK_USER_DIR"
-          flatpak search --columns=help anything || true
-          flatpak remote-ls --columns=help || true
-          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          echo "== search with no appstream data"
-          time flatpak search vlc | head -n 5 || true
-          echo "== remote-ls with names and sizes, no appstream data"
-          time flatpak remote-ls --user --app --columns=application,name,description,installed-size flathub | head -n 5 || true
-          echo "== the appstream pull"
-          time flatpak update --user --appstream -y || true
-          du -sh "$FLATPAK_USER_DIR"/appstream* 2>/dev/null || true
-          find "$FLATPAK_USER_DIR" -maxdepth 3 -name 'appstream*' | head
-          echo "== search after it"
-          time flatpak search vlc | head -n 5 || true
-          flatpak search --columns=application,name,description,installed-size,remotes vlc | head -n 5 || true
-          echo "== one app with nothing installed"
-          flatpak remote-info --user flathub org.videolan.VLC || true
-          echo "== its metadata"
-          flatpak remote-info --user --show-metadata flathub org.videolan.VLC || true
-          echo "== remote-ls with names after the pull"
-          flatpak remote-ls --user --app --columns=application,name,description,installed-size flathub | head -n 5 || true
-      - name: The test's repository, as it is and with a metainfo file
-        run: |
-          set -x
-          export PATH=$PWD/fp/bin:$PATH
-          export FLATPAK_USER_DIR=$RUNNER_TEMP/fuser2
-          mkdir -p "$FLATPAK_USER_DIR"
-          ls test-flatpak/repo/refs/heads || true
-          find test-flatpak/repo/refs -type f | head -n 20
-          flatpak remote-add --user --no-gpg-verify rift-test "file://$PWD/test-flatpak/repo"
-          flatpak remote-ls --user --app --columns=application,name,description,installed-size rift-test || true
-          echo "== search for it"
-          flatpak search TestApp || true
-          flatpak update --user --appstream -y || true
-          flatpak search TestApp || true
-          echo "== its metadata, which is where the permissions are"
-          flatpak remote-info --user --show-metadata rift-test dev.rift.TestApp || true
-          flatpak remote-info --user rift-test dev.rift.TestApp || true
-
-          echo "=== now one with a metainfo file of its own"
           export HOME=$RUNNER_TEMP/home
           mkdir -p "$HOME"
-          mkdir -p probe/files/bin probe/files/share/metainfo probe/export/share/applications
+          mkdir -p probe/files/bin probe/files/share/app-info/xmls probe/export/share/applications
           printf '#!/bin/sh\necho hello\n' > probe/files/bin/probe
           chmod 755 probe/files/bin/probe
           cat > probe/metadata <<'EOF'
           [Application]
-          name=dev.rift.ProbeApp
+          name=dev.rift.TestEditor
           runtime=dev.rift.TestPlatform/x86_64/test
           sdk=dev.rift.TestPlatform/x86_64/test
           command=probe
@@ -77,48 +35,49 @@ jobs:
           shared=network;ipc;
           sockets=wayland;pulseaudio;
           devices=dri;
-          filesystems=home;xdg-download;
+          filesystems=home;xdg-download:ro;
 
           [Session Bus Policy]
           org.freedesktop.Notifications=talk
           EOF
-          cat > probe/files/share/metainfo/dev.rift.ProbeApp.metainfo.xml <<'EOF'
+          cat > components.xml <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
-          <component type="desktop-application">
-            <id>dev.rift.ProbeApp</id>
-            <name>Rift probe app</name>
-            <summary>What the store shows before an app is installed</summary>
-            <description>
-              <p>A probe app with a metainfo file, so the store can show a name, a summary and a description that did not come from its id.</p>
-            </description>
-            <metadata_license>CC0-1.0</metadata_license>
-            <project_license>MIT</project_license>
-            <launchable type="desktop-id">dev.rift.ProbeApp.desktop</launchable>
-            <categories><category>Utility</category></categories>
-          </component>
+          <components version="0.8">
+            <component type="desktop-application">
+              <id>dev.rift.TestEditor.desktop</id>
+              <name>Rift test editor</name>
+              <summary>A plain text editor for the boot test</summary>
+              <description><p>The app the boot test installs from the store. It has a name and a summary of its own, so the store has something to search.</p></description>
+              <project_license>MIT</project_license>
+              <metadata_license>CC0-1.0</metadata_license>
+              <categories><category>Utility</category><category>TextEditor</category></categories>
+            </component>
+          </components>
           EOF
-          cat > probe/export/share/applications/dev.rift.ProbeApp.desktop <<'EOF'
+          gzip -n -c components.xml > probe/files/share/app-info/xmls/dev.rift.TestEditor.xml.gz
+          cat > probe/export/share/applications/dev.rift.TestEditor.desktop <<'EOF'
           [Desktop Entry]
           Type=Application
-          Name=Rift probe app
+          Name=Rift test editor
           Exec=probe
-          Icon=dev.rift.ProbeApp
           Categories=Utility;
           EOF
           flatpak build-export --disable-fsync probe-repo probe test
           flatpak build-update-repo probe-repo
-          find probe-repo/refs -type f | head -n 20
-          export FLATPAK_USER_DIR=$RUNNER_TEMP/fuser3
+          find probe-repo/refs -type f
+          export FLATPAK_USER_DIR=$RUNNER_TEMP/fuser
           mkdir -p "$FLATPAK_USER_DIR"
           flatpak remote-add --user --no-gpg-verify probe "file://$PWD/probe-repo"
-          echo "== remote-ls before any appstream pull"
+          echo "== remote-ls, which is where the store reads its catalogue"
           flatpak remote-ls --user --app --columns=application,name,description,installed-size probe || true
-          echo "== search before any appstream pull"
-          flatpak search ProbeApp || true
-          flatpak search probe || true
-          echo "== after the pull"
+          echo "== search, before and after a pull"
+          flatpak search editor || true
           flatpak update --user --appstream -y || true
-          flatpak search ProbeApp || true
-          flatpak search --columns=application,name,description,installed-size,remotes probe || true
+          flatpak search editor || true
           flatpak remote-ls --user --app --columns=application,name,description,installed-size probe || true
-          flatpak remote-info --user --show-metadata probe dev.rift.ProbeApp || true
+          echo "== the appstream the repository carries"
+          zcat probe/files/share/app-info/xmls/dev.rift.TestEditor.xml.gz | head -n 4
+          mkdir -p pulled
+          flatpak remote-info --user --show-metadata probe dev.rift.TestEditor || true
+          echo "== and what a second app with no appstream looks like beside it"
+          flatpak remote-ls --user --columns=application,name,description,installed-size probe || true
