@@ -31,8 +31,9 @@ let
   # rd.luks=0 turns off the generator that would make the unit that opens persist, so nothing asks
   # for the passphrase and nothing touches the header. The masks are for the other side of the
   # switch: the mounts are noauto there too, so nothing requires them, but Vault, Orbit and Quasar
-  # each name a path on persist in RequiresMountsFor=, and a masked unit makes them fail at once
-  # instead of waiting ninety seconds for a device that is not coming
+  # each name a path on persist in RequiresMountsFor=, which would wait ninety seconds for a device
+  # that is not coming. A masked mount is not waited for at all, so all three start at once and find
+  # the empty directory the initrd made, which a probe measured (ADR-0083)
   words = lib.concatStringsSep " " (
     [
       "rift.ghost"
