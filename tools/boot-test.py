@@ -201,8 +201,12 @@ COMMAND_END = r"\x1b\]133;D;(\d+)(?:\x07|\x1b\\)"
 ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?>=]*[A-Za-z]|\x1b[=>]")
 # the line the firmware prints a fraction of a second before it starts the loader on the esp. it is
 # the only moment a key reaches systemd-boot's menu, since the firmware's own boot stage reads the
-# keyboard until then
+# keyboard until then, and it is also how a vm that never started is told from one that did
 HANDOFF = r"BdsDxe: starting Boot"
+HANDOFF_SECONDS = 180
+SPAWNS = 3
+# what the vm app says once the drive is written and qemu is about to start
+BOOTING = r"rift-vm: booting \S+ as an nvme drive"
 # a line of the journal on the serial console, with the two line ends it comes with. it can land in
 # the middle of a line a command prints, between two of its writes
 JOURNAL = re.compile(r"(?:^[ \t]*)?\[\s*\d+\.\d+\] [^\n]*\n{0,2}", re.M)
@@ -1657,10 +1661,37 @@ def main():
 
     start = time.monotonic()
     deadline = start + args.timeout
-    child = pexpect.spawn(cmd[0], cmd[1:], encoding="utf-8", codec_errors="replace", dimensions=(40, 160))
     # the clone boots in a second qemu, whose output goes on in the same log
     tee = Tee(args.log)
-    child.logfile_read = tee
+
+    def spawn(line, what):
+        """Start the vm and wait for the firmware to hand the loader the machine. About one boot in
+        five says nothing at all on the serial console after that, and a vm that never started is
+        not an answer to anything, so it is started again. Everything before the handoff, which for
+        the first boot of a run is rift-flash writing the drive, gets the whole deadline; the
+        handoff itself gets a window of its own."""
+        started = None
+        for attempt in range(1, SPAWNS + 1):
+            started = pexpect.spawn(line[0], line[1:], encoding="utf-8", codec_errors="replace",
+                                    dimensions=(40, 160))
+            started.logfile_read = tee
+            try:
+                started.expect([BOOTING], timeout=max(1, deadline - time.monotonic()))
+                started.expect([HANDOFF], timeout=HANDOFF_SECONDS)
+                return started
+            except (pexpect.TIMEOUT, pexpect.EOF):
+                print(f"\nboot-test: {what} said nothing in {HANDOFF_SECONDS} s on try {attempt}, "
+                      f"starting it again", flush=True)
+                started.terminate(force=True)
+                # a run that keeps its drive has written it by now, and rift-flash only writes into
+                # an empty file, so the next try needs the file gone. The boots that are given a
+                # drive that is already written say --image and not --persist, and those keep it
+                if "--persist" in line and "--drive" in line and kept and os.path.exists(kept):
+                    os.remove(kept)
+                time.sleep(2)
+        return started
+
+    child = spawn(cmd, "the vm")
 
     def since():
         return f"{time.monotonic() - start:.0f}s"
@@ -2168,9 +2199,7 @@ def main():
                 else:
                     again.append(arg)
             print("\nboot-test: " + " ".join(again), flush=True)
-            child = pexpect.spawn(again[0], again[1:], encoding="utf-8", codec_errors="replace",
-                                  dimensions=(40, 160))
-            child.logfile_read = tee
+            child = spawn(again, f"the vm on {machine}")
             came_up(f"on {machine}", passphrase_wanted)
 
         # the drive as it comes: nothing is sealed, and the machine is one it has never seen
@@ -2331,8 +2360,7 @@ def main():
             boot does not work: the firmware's own boot stage reads the keyboard too, and by the
             time systemd-boot polls for one the buffer is empty. What the firmware does print on
             the serial console is the line it starts the loader on the esp with, a fraction of a
-            second before it does, so that is the anchor."""
-            expect([HANDOFF], "the firmware to start the loader on the esp")
+            second before it does, so that is the anchor, and spawn has just read it."""
             ok("the firmware started the loader on the esp")
             # the space bar stops the menu's countdown. it is bound to nothing else, so a run of
             # them is harmless, and the first one that lands keeps the menu up
@@ -2371,9 +2399,9 @@ def main():
                     again.append(arg)
             again += ["-qmp", f"unix:{qmp_path},server,nowait"]
             print("\nboot-test: " + " ".join(again), flush=True)
-            child = pexpect.spawn(again[0], again[1:], encoding="utf-8", codec_errors="replace",
-                                  dimensions=(40, 160))
-            child.logfile_read = tee
+            # spawn comes back the moment the firmware hands the loader the machine, which is the
+            # one moment a key reaches systemd-boot's menu
+            child = spawn(again, f"the vm for {what}")
             ok(f"booting {what}")
             if ghost:
                 pick_ghost(qmp_path, menu_png)
