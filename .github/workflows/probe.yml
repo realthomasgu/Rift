@@ -1,4 +1,4 @@
-name: probe-appstream
+name: store probe
 
 on:
   workflow_dispatch:
