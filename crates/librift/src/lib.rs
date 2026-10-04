@@ -4,7 +4,8 @@
 //! the clock, the language and the keyboard layouts), the printers CUPS has a queue for, the apps
 //! the desktop entries name and where their icons are, which app opens each kind of file, what
 //! the camera portal and the firewall allow, what the dock keeps and where it stands, Do
-//! not disturb and the apps whose banners stay off, which of the programs the shell's keys start is
+//! not disturb and the apps whose banners stay off, whether this boot is a Ghost one, which of the
+//! programs the shell's keys start is
 //! running, the index for search by meaning, what the system calls itself, dark or light and the
 //! wallpaper, the mouse and the touchpad, the sound `PipeWire` plays and hears, how the boot looks,
 //! the owner's account, the apps Flatpak installs and the ones Rift suggests, what is in a folder
@@ -42,6 +43,7 @@ pub mod files;
 // flatpak is how a freedesktop session installs apps, which rift-flash has no use for either
 #[cfg(unix)]
 pub mod flatpak;
+pub mod ghost;
 #[cfg(unix)]
 pub mod icons;
 pub mod keyboard;
