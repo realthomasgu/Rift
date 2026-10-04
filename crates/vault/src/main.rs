@@ -121,6 +121,13 @@ fn main() -> ExitCode {
         }
     };
 
+    if librift::ghost::on()
+        && let Some(what) = not_in_ghost_mode(&command)
+    {
+        eprintln!("{}", librift::ghost::cannot(what));
+        return ExitCode::FAILURE;
+    }
+
     let result = match command {
         Command::Serve => bus::serve(timeline, backups, home, esp, drive, sealed, keys)
             .map_err(|e| format!("vault: could not answer on the system bus: {e}")),
@@ -186,6 +193,28 @@ fn main() -> ExitCode {
             eprintln!("{why}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// What a command cannot do in a Ghost boot, when it is one of the commands that cannot. Persist
+/// stays locked there and nothing of the drive is mounted, so a command that reads or writes what
+/// the drive keeps says the mode and does nothing (ADR-0084).
+///
+/// `serve` is not one of them: it answers on the bus and refuses method by method, so the pages and
+/// the rift command get the sentence for what they ask. `owner` is not one either, because it runs
+/// at every boot and leaves the image's own name and password in place when persist has none, and
+/// the copy a restore runs is not, because the method that starts it has already refused.
+fn not_in_ghost_mode(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Take => Some("A snapshot cannot be taken"),
+        Command::Prune | Command::List => Some("Timeline snapshots cannot be reached"),
+        Command::Target { .. } => Some("A folder for backups cannot be chosen"),
+        Command::Backup => Some("A backup cannot be made"),
+        Command::Backups => Some("Backups cannot be reached"),
+        Command::Clone { .. } => Some("This drive cannot be cloned"),
+        Command::EnrollKey => Some("A security key cannot be added to the drive"),
+        Command::Exchange => Some("The exchange partition cannot be mounted"),
+        Command::Serve | Command::Owner | Command::RestoreFile { .. } => None,
     }
 }
 

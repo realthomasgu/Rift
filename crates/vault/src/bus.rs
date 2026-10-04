@@ -12,6 +12,10 @@
 //! and root alone too. `SecurityKeys` and `RemoveSecurityKey` say which security keys open persist
 //! and take one off, and answer the owner and root alone as well. Adding one is not here: it needs
 //! a terminal, so `vault enroll-key` does it as root.
+//!
+//! In a Ghost boot persist stays locked and nothing of the drive is mounted, so every one of these
+//! but `Owner` refuses with the one sentence the mode says (ADR-0084). The refusal is here rather
+//! than in each page and command, so there is one place that decides what the drive does not do.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,10 +46,41 @@ pub struct Vault {
     keys: Arc<Keys>,
 }
 
+/// What a method answers with when this boot is a Ghost one: the one sentence the mode says, as
+/// the error, so the page or the command that asked prints it and says nothing untrue.
+///
+/// Persist stays locked in a Ghost boot and nothing of the drive is mounted, which is the whole of
+/// what the mode promises (ADR-0082), so every method that reads or writes what the drive keeps
+/// refuses here instead of answering with the image's own defaults or mounting the esp to look.
+/// `Owner` is the one read that stays: the session has a name and a password of its own, the
+/// image's, and those are the truth about the session (ADR-0084).
+fn in_ghost_mode(what: &str) -> fdo::Error {
+    fdo::Error::Failed(librift::ghost::cannot(what))
+}
+
+/// What each refusal says it cannot do. The sentence a person reads is this and the mode's.
+const SNAPSHOTS: &str = "Timeline snapshots cannot be reached";
+const TAKE: &str = "A snapshot cannot be taken";
+const RESTORE: &str = "A file cannot be restored from a snapshot";
+const BACKUPS: &str = "Backups cannot be reached";
+const BACKUP: &str = "A backup cannot be made";
+const RESTORE_BACKUP: &str = "A file cannot be restored from a backup";
+const BOOT_STYLE: &str = "How the next boot looks cannot be read";
+const SET_BOOT_STYLE: &str = "How the next boot looks cannot be changed";
+const SLOTS: &str = "What this drive holds cannot be read";
+const OWNER_NAME: &str = "The owner's name cannot be changed";
+const OWNER_PASSWORD: &str = "The password cannot be changed";
+const UNLOCKING: &str = "What opens the drive cannot be read";
+const SET_UNLOCKING: &str = "What opens the drive cannot be changed";
+const REMOVE_KEY: &str = "A security key cannot be taken off the drive";
+
 #[zbus::interface(name = "dev.rift.Vault")]
 impl Vault {
     /// Every snapshot of home, oldest first.
     async fn list(&self) -> fdo::Result<Vec<String>> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(SNAPSHOTS));
+        }
         let timeline = Arc::clone(&self.timeline);
         blocking::unblock(move || timeline.list())
             .await
@@ -54,6 +89,9 @@ impl Vault {
 
     /// Takes a snapshot of home now and returns its name.
     async fn take(&self) -> fdo::Result<String> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(TAKE));
+        }
         let timeline = Arc::clone(&self.timeline);
         let (name, dropped) = blocking::unblock(move || timeline.take())
             .await
@@ -76,6 +114,9 @@ impl Vault {
         path: String,
         replace: bool,
     ) -> fdo::Result<(String, String)> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(RESTORE));
+        }
         let account = caller(&header, connection).await?;
         let timeline = Arc::clone(&self.timeline);
         let home = Arc::clone(&self.home);
@@ -95,6 +136,9 @@ impl Vault {
 
     /// Every backup on the backup disk, oldest first: its id and when it was made.
     async fn backups(&self) -> fdo::Result<Vec<(String, String)>> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(BACKUPS));
+        }
         let backups = Arc::clone(&self.backups);
         let listed = blocking::unblock(move || backups.list())
             .await
@@ -108,6 +152,9 @@ impl Vault {
     /// Where backups go: the folder on the backup disk, and the uuid of the file system it is on.
     #[zbus(out_args("folder", "disk"))]
     async fn target(&self) -> fdo::Result<(String, String)> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(BACKUPS));
+        }
         let backups = Arc::clone(&self.backups);
         let target = blocking::unblock(move || backups.target())
             .await
@@ -118,6 +165,9 @@ impl Vault {
     /// Backs up home now and returns the backup's id and when it was made.
     #[zbus(out_args("id", "time"))]
     async fn backup(&self) -> fdo::Result<(String, String)> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(BACKUP));
+        }
         let backups = Arc::clone(&self.backups);
         let made = blocking::unblock(move || backups.back_up())
             .await
@@ -138,6 +188,9 @@ impl Vault {
         path: String,
         replace: bool,
     ) -> fdo::Result<(String, String)> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(RESTORE_BACKUP));
+        }
         let account = caller(&header, connection).await?;
         let backups = Arc::clone(&self.backups);
         let home = Arc::clone(&self.home);
@@ -149,6 +202,9 @@ impl Vault {
 
     /// How the next boot of this drive looks: `text` or `graphical`.
     async fn boot_style(&self) -> fdo::Result<String> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(BOOT_STYLE));
+        }
         let esp = Arc::clone(&self.esp);
         blocking::unblock(move || esp.style())
             .await
@@ -158,6 +214,9 @@ impl Vault {
 
     /// Writes how the next boot of this drive looks. The word is `text` or `graphical`.
     async fn set_boot_style(&self, style: String) -> fdo::Result<()> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(SET_BOOT_STYLE));
+        }
         let wanted = Style::from_setting(&style);
         if wanted.word() != style.trim() {
             return Err(fdo::Error::InvalidArgs(format!(
@@ -198,6 +257,9 @@ impl Vault {
         #[zbus(connection)] connection: &zbus::Connection,
         name: String,
     ) -> fdo::Result<()> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(OWNER_NAME));
+        }
         let uid = owner_or_root(&header, connection, &self.owner).await?;
         let owner = Arc::clone(&self.owner);
         let chosen = name.trim().to_string();
@@ -218,6 +280,9 @@ impl Vault {
         current: String,
         new: String,
     ) -> fdo::Result<()> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(OWNER_PASSWORD));
+        }
         let uid = owner_or_root(&header, connection, &self.owner).await?;
         let owner = Arc::clone(&self.owner);
         let done = blocking::unblock(move || {
@@ -244,6 +309,9 @@ impl Vault {
     /// there. A uki's name carries the boots systemd-boot has left to try of it.
     #[zbus(out_args("running", "slots", "source", "waiting"))]
     async fn slots(&self) -> fdo::Result<librift::update::Answer> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(SLOTS));
+        }
         let drive = Arc::clone(&self.drive);
         let esp = Arc::clone(&self.esp);
         blocking::unblock(move || drive.slots(&esp))
@@ -261,6 +329,9 @@ impl Vault {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<(String, String, bool)> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(UNLOCKING));
+        }
         owner_or_root(&header, connection, &self.owner).await?;
         let fingerprint = this_machine().await?;
         let sealed = Arc::clone(&self.sealed);
@@ -286,6 +357,9 @@ impl Vault {
         on: bool,
         passphrase: String,
     ) -> fdo::Result<()> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(SET_UNLOCKING));
+        }
         let uid = owner_or_root(&header, connection, &self.owner).await?;
         let sealed = Arc::clone(&self.sealed);
         if !on {
@@ -322,6 +396,9 @@ impl Vault {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<Vec<(u32, bool, bool)>> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(UNLOCKING));
+        }
         owner_or_root(&header, connection, &self.owner).await?;
         let keys = Arc::clone(&self.keys);
         blocking::unblock(move || keys.list())
@@ -342,6 +419,9 @@ impl Vault {
         #[zbus(connection)] connection: &zbus::Connection,
         slot: u32,
     ) -> fdo::Result<()> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(REMOVE_KEY));
+        }
         let uid = owner_or_root(&header, connection, &self.owner).await?;
         let keys = Arc::clone(&self.keys);
         blocking::unblock(move || keys.remove(slot))
@@ -488,5 +568,40 @@ pub fn serve(
     // the connection runs on its own threads; this one has nothing left to do
     loop {
         std::thread::park();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_refusal_names_the_mode_and_reads_as_a_sentence() {
+        let refusals = [
+            SNAPSHOTS,
+            TAKE,
+            RESTORE,
+            BACKUPS,
+            BACKUP,
+            RESTORE_BACKUP,
+            BOOT_STYLE,
+            SET_BOOT_STYLE,
+            SLOTS,
+            OWNER_NAME,
+            OWNER_PASSWORD,
+            UNLOCKING,
+            SET_UNLOCKING,
+            REMOVE_KEY,
+        ];
+        for what in refusals {
+            let said = librift::ghost::cannot(what);
+            assert!(said.starts_with(what), "{said}");
+            assert!(said.contains(librift::ghost::NAME), "{said}");
+            assert!(said.ends_with('.'), "{said}");
+            assert!(said.is_ascii(), "{said}");
+            // what cannot be done, not an error: no full stop of its own and no path in it
+            assert!(!what.ends_with('.'), "{what}");
+            assert!(!what.contains('/'), "{what}");
+        }
     }
 }
