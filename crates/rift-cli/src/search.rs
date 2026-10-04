@@ -13,6 +13,7 @@ use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use librift::ghost;
 use librift::quasar::{self, Client};
 use librift::search::{self, Hit, Index, Missing};
 
@@ -28,6 +29,8 @@ best first, with the line where the closest part starts and the day the file las
 
 /// How many files a search lists.
 const RESULTS: usize = 10;
+/// What a search by meaning cannot do in a Ghost boot.
+const NOTHING_INDEXED: &str = "Nothing can be searched by meaning";
 /// How long an update waits for the embedding model to load.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
 /// How often it looks while it waits.
@@ -144,6 +147,10 @@ fn find(words: &str) -> Result<Vec<Hit>, String> {
 /// since that is what a person has in front of them.
 fn said(missing: Missing) -> String {
     match missing {
+        // in a Ghost boot the index is under home, which is memory, and the model that would make
+        // one is on the locked drive, so there is nothing to index with and nothing to index from:
+        // the mode is the reason, not a command the person has not run yet (ADR-0084)
+        Missing::NotIndexed | Missing::Empty if ghost::on() => ghost::cannot(NOTHING_INDEXED),
         Missing::NotIndexed | Missing::Empty => {
             "Nothing is indexed yet. Run rift ai index first.".to_string()
         }

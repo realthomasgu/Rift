@@ -7,6 +7,7 @@
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode};
 
+use librift::ghost;
 use librift::orbit::{self, Host, Output};
 use librift::vault::{self, AutoUnlock};
 
@@ -25,6 +26,9 @@ the passphrase always opens the drive, here and anywhere else. keys says which s
 the drive, enroll-key adds the one that is plugged in, and remove-key takes one off by the keyslot \
 keys prints. A security key belongs to the drive and not to a machine, so any number of them may \
 be enrolled and they work on every machine.";
+
+/// What a setting written in a Ghost boot is: this login's, and no drive's.
+const FOR_THIS_SESSION: &str = "It is set for this session";
 
 pub fn run(args: &[String]) -> ExitCode {
     let one = match args {
@@ -82,7 +86,14 @@ fn set(args: &[String]) -> ExitCode {
         }
     };
     match written {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            // the profile is under /var/lib, which is memory in a Ghost boot, so the setting is
+            // real for this login and is on no drive afterwards (ADR-0084)
+            if ghost::on() {
+                println!("{}", ghost::not_kept(FOR_THIS_SESSION));
+            }
+            ExitCode::SUCCESS
+        }
         Err(why) => {
             eprintln!("{why}");
             ExitCode::FAILURE
