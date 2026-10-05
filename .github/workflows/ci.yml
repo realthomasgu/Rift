@@ -396,11 +396,12 @@ jobs:
 
       # the image runs from here on through the flake's vm app: rift-flash writes it onto a drive in a
       # file, qemu boots that with kvm, everything over serial
-      - name: Build the vm app, rift-flash and the test's flatpak
+      - name: Build the vm app, rift-flash and the test's flatpak and appimage
         run: |
           nix build .#vm -o vm -L
           nix build .#rift-flash -o flash -L
           nix build .#test-flatpak -o test-flatpak -L
+          nix build .#test-appimage -o test-appimage -L
       - name: Install pexpect
         run: |
           sudo apt-get update >/dev/null
@@ -528,7 +529,7 @@ jobs:
           python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --models models/cache \
             --exchange 1G --log serial.log --splash splash.png --desktop desktop.png --lens \
             --updates updates.img --backup backup.img --clone clone.img --stick stick.img \
-            --locked locked.img --flatpak test-flatpak --timeout 2400
+            --locked locked.img --flatpak test-flatpak --appimage test-appimage --timeout 2400
       - name: Boot a drive that makes persist at its first boot
         # rift-flash leaves persist out, the way it writes a drive on macos and windows. the drive
         # asks for a passphrase over serial, makes persist and formats its exchange partition, and the

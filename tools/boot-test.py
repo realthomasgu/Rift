@@ -141,6 +141,11 @@ own signed repository later and adds it as a remote, Welcome opened again lists 
 size, and the test ticks it and presses Install: the install finishes, flatpak list has the app and its
 runtime in the system installation, and the app is in the Applications menu.
 
+With --appimage the test serves an appimage of its own, downloads it onto the drive and runs it: by
+itself, which is the kernel's binfmt rule sending it through appimage-run; with appimage-run and no
+execute bit; in a sandbox, which cannot run one and says so; and from the file manager, which asks
+once before it runs.
+
 With --lens the desktop check expects lens's bar along the top of that screen: horizon reports a
 layer surface with its namespace, and the screendump has the bar gray with something drawn at its
 left, in its middle and at its right, and the desktop gray below. `lens --state` prints what the bar
@@ -1583,6 +1588,8 @@ def main():
                     f"system labelled {DRIVE_INSIDE} in it, attach it as a removable disk and unlock it from Files")
     ap.add_argument("--flatpak", help="the directory nix build .#test-flatpak makes, with a signed repository and its "
                     "key: add it as a remote, install its app from Welcome and run it with the portals")
+    ap.add_argument("--appimage", help="the directory nix build .#test-appimage makes, with an appimage of the "
+                                      "test's own: serve it, download it onto the drive and run it")
     ap.add_argument("--offline", help="boot with no network card, check Welcome opens on the page that says so, save "
                     "its screendump as this png, and that it opens again after Open later and a reboot")
     ap.add_argument("--ghost", help="boot the drive's ghost entry, which leaves persist locked and keeps the "
@@ -9636,6 +9643,92 @@ def main():
         net_server.shutdown()
         ok(f"rift net off cut {net_units[0]} while it ran, the Privacy page gave {app_id} the network "
            f"back and took {net_override} away, and the running app fetched again")
+
+    # 6h. an appimage: an application in one file, which the install model calls an escape hatch and
+    # no store can list, since there is no catalogue of them and nothing to install. the program
+    # inside one asks for the loader at /lib64/ld-linux-x86-64.so.2 and for its libraries by name
+    # alone, and a nix system has neither, so appimage-run lays those folders out over the store and
+    # runs the file in them, and the kernel's two binfmt rules send a file a person runs through it.
+    # the test serves an appimage of its own, which is the shape a real one is: a runtime with the
+    # signature in its elf header and a squashfs after it, holding an AppRun and a program linked
+    # the way an app in an appimage is. it comes down into Downloads and runs four ways: by itself with the
+    # execute bit on, which is the kernel's rule and nothing else; through appimage-run with the bit
+    # off; in a sandbox, which cannot run one and says so; and from the file manager, which asks once
+    # before it runs, the way windows and macos ask for a program that was downloaded
+    if args.appimage:
+        appimage_name = "rift-test.AppImage"
+        appimage_said = "rift test appimage ran"
+        appimage_path = f"/home/{OWNER_USER}/Downloads/{appimage_name}"
+        appimage_wrote = f"/home/{OWNER_USER}/appimage-ran.txt"
+        appimage_server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), functools.partial(Quiet, directory=os.path.abspath(args.appimage)))
+        threading.Thread(target=appimage_server.serve_forever, daemon=True).start()
+        appimage_url = f"http://10.0.2.2:{appimage_server.server_address[1]}/{appimage_name}"
+        status, output = run(f"curl -sf -o {appimage_path} {appimage_url}; and chmod +x {appimage_path}; "
+                             f"and ls -l {appimage_path}", "the test's appimage, onto the drive")
+        if status != 0:
+            fail(f"the vm did not get {appimage_url}: {without_console(output).strip()!r}")
+
+        def appimage_ran(what):
+            """Whether the program inside the appimage wrote its line into home. The file goes away
+            once it is there, so the next run is answered by itself and not by the one before."""
+            status, output = run(f"cat {appimage_wrote}", what)
+            if status != 0 or appimage_said not in without_console(output):
+                return False
+            run(f"rm -f {appimage_wrote}", "the line it wrote, out of the way")
+            return True
+
+        # the kernel's rule: nothing on the line but the file itself, and what answers is the program
+        # inside it, not the runtime, which says to use appimage-run and nothing more
+        run(f"rm -f {appimage_wrote}", "the line the appimage writes, out of the way")
+        status, printed = sandboxed(appimage_path, "the appimage run by itself")
+        if status != 0 or appimage_said not in spaced(printed):
+            fail(f"{appimage_path} exited with {status} without saying {appimage_said!r}")
+        if not appimage_ran("the line the appimage wrote"):
+            fail(f"the appimage ran and wrote no {appimage_wrote}")
+        ok(f"{appimage_name} ran on the drive by itself: the kernel sent it through appimage-run, "
+           f"which laid out the folders the program inside it needs and ran it")
+
+        # and with no execute bit, which is how a file comes out of a browser: appimage-run reads it
+        status, _ = sandboxed(f"chmod -x {appimage_path}; and {appimage_path}",
+                              "the appimage with no execute bit")
+        if status == 0:
+            fail(f"{appimage_path} ran with no execute bit")
+        status, printed = sandboxed(f"appimage-run {appimage_path}", "appimage-run on the file")
+        if status != 0 or appimage_said not in spaced(printed) or not appimage_ran("the line it wrote"):
+            fail(f"appimage-run exited with {status} without saying {appimage_said!r}")
+        ok("a file with no execute bit is refused by the kernel and run by appimage-run itself")
+
+        # a sandbox cannot run one, and says which file and what to do rather than failing inside
+        status, printed = sandboxed(f"rift run --sandbox {appimage_path}", "a sandbox asked for an appimage")
+        if status == 0 or f"{appimage_name} is an AppImage." not in spaced(printed) \
+                or "Run the file on its own instead." not in spaced(printed):
+            fail(f"rift run --sandbox exited with {status} without saying an appimage cannot be sandboxed")
+        ok("rift run --sandbox refused the appimage with the sentence that says what to do")
+
+        # the file manager asks once, since nothing of the system has checked the file and it runs
+        # with everything the owner can reach. the file still has no execute bit
+        if args.desktop and args.lens:
+            appimage_stem, appimage_extension = os.path.splitext(args.desktop or "desktop.png")
+            run(f"systemd-run --user --quiet --collect --unit=rift-appimage -- "
+                f"rift-files /home/{OWNER_USER}/Downloads", "Downloads opened in Files")
+            files_until(120, lambda lines: files_value(lines, "location") == f"/home/{OWNER_USER}/Downloads"
+                        and f"row file {appimage_name}" in lines, "its window on Downloads")
+            files_select(appimage_name)
+            files_set("open-selected", "now", "the appimage opened")
+            files_until(60, lambda lines: files_value(lines, "dialog") == "run",
+                        "its question before the appimage runs")
+            time.sleep(3)
+            shot(f"{appimage_stem}-files-appimage{appimage_extension}", "files-appimage")
+            files_set("confirm", "now", "Run pressed")
+            if not wait_for(120, lambda: appimage_ran("the line the appimage wrote from Files")):
+                fail(f"Files pressed Run and nothing wrote {appimage_wrote}; its state is "
+                     f"{files_state('Files after Run')!r}"[:2000])
+            close_app(FILES_APP, FILES_APP_ID)
+            ok("Files asked before the appimage ran, with what it is and what running it allows, "
+               "and Run started it without the file ever being made executable")
+        appimage_server.shutdown()
+        run(f"rm -f {appimage_path}", "the appimage, off the drive")
 
     # 7. the update. the second drive holds two newer versions' files. systemd-sysupdate checks them
     # against SHA256SUMS, writes the store and its verity partition into the free slot under the
