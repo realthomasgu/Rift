@@ -266,8 +266,12 @@
             image = os.system.build.image;
             # the files systemd-sysupdate installs the next version from
             update = import ./nix/image/update.nix { inherit (next) config pkgs; };
-            # and the version after it, which is never marked good
-            broken-update = import ./nix/image/update.nix { inherit (broken) config pkgs; };
+            # and the version after it, which is never marked good. it is only ever installed
+            # from its whole files, by systemd-sysupdate, so it publishes no chunk store
+            broken-update = import ./nix/image/update.nix {
+              inherit (broken) config pkgs;
+              chunks = false;
+            };
             # the flatpak runtime and app the boot test installs, as bundles
             test-flatpak = import ./nix/test-flatpak.nix { inherit pkgs; };
             # an appimage of our own, which the boot test downloads and runs on the drive

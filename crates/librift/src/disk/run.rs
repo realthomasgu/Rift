@@ -82,6 +82,22 @@ pub fn sfdisk_args(disk: &Path) -> Vec<OsString> {
     args
 }
 
+/// Names a partition that is already there and gives it a uuid, which is the whole of what a slot
+/// needs when a new version has been written into it: `sfdisk --part-label <disk> <n> <label>` and
+/// `--part-uuid` beside it. Two commands, since sfdisk takes one of these at a time.
+///
+/// The uuid matters as much as the label: the initrd finds the store of the version it is starting
+/// by the uuids made from the root hash in its uki, not by the label.
+#[must_use]
+pub fn name_args(disk: &Path, number: usize, label: &str, uuid: &str) -> [Vec<OsString>; 2] {
+    let one = |flag: &str, value: &str| {
+        let mut args: Vec<OsString> = vec![flag.into(), disk.into()];
+        args.extend([number.to_string().into(), value.into()]);
+        args
+    };
+    [one("--part-label", label), one("--part-uuid", uuid)]
+}
+
 /// A new LUKS2 header, and with it a new volume key. The passphrase comes on stdin, as it is.
 #[must_use]
 pub fn format_args(partition: &Path) -> Vec<OsString> {
@@ -554,6 +570,29 @@ mod tests {
         args.into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn a_written_slot_is_named_and_given_its_uuid() {
+        let [label, uuid] = name_args(
+            Path::new("/dev/sda"),
+            5,
+            "store_0.2.0",
+            "6ab4281a-4ab2-22c4-1971-d2ec8da372ee",
+        );
+        assert_eq!(
+            words(label),
+            ["--part-label", "/dev/sda", "5", "store_0.2.0"]
+        );
+        assert_eq!(
+            words(uuid),
+            [
+                "--part-uuid",
+                "/dev/sda",
+                "5",
+                "6ab4281a-4ab2-22c4-1971-d2ec8da372ee"
+            ]
+        );
     }
 
     #[test]

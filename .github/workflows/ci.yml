@@ -348,16 +348,22 @@ jobs:
           fi
           echo "::notice title=Store partition::$line"
       - name: Report what a version costs on the wire
-        # the three files systemd-sysupdate installs a version from. this is the number an update
-        # has to cut, so every run prints it
+        # the whole files systemd-sysupdate installs a version from, and the indexes and chunks
+        # rift update installs it from. the first is the number a delta has to cut, the second is
+        # what is published instead of it. what a delta really costs is in the delta boot below
         run: |
-          total=0
+          whole=0 indexes=0
           for file in result-1/rift_*; do
             bytes=$(stat -Lc %s "$file")
-            total=$((total + bytes))
+            case $file in
+              *.caibx | *.roothash) indexes=$((indexes + bytes)) ;;
+              *) whole=$((whole + bytes)) ;;
+            esac
             echo "  $(numfmt --to=iec-i --suffix=B "$bytes") $(basename "$file")"
           done
-          line="A version is $(numfmt --to=iec-i --suffix=B "$total") ($total bytes) on the wire"
+          chunks=$(du -sb result-1/chunks | cut -f1)
+          echo "  $(numfmt --to=iec-i --suffix=B "$chunks") chunks, $(find result-1/chunks -type f | wc -l) files"
+          line="A version is $(numfmt --to=iec-i --suffix=B "$whole") ($whole bytes) as whole files, and its indexes are $(numfmt --to=iec-i --suffix=B "$indexes")"
           echo "$line"
           echo "::notice title=A version on the wire::$line"
       - name: Diagnose
@@ -379,11 +385,13 @@ jobs:
           zstd -T0 -12 "$img" -o rift.raw.zst
           ls -la result/ rift.raw.zst
           # the update files are compressed already. one directory for each version, linked to the
-          # files in the store rather than copied, which only root can do there
+          # files in the store rather than copied, which only root can do there. next carries the
+          # chunk store as well, which is what rift update installs from
           mkdir updates
           sudo cp -rlL result-1 updates/next
           sudo cp -rlL result-2 updates/broken
-          ls -la updates/*
+          ls -la updates/next | head -n 12
+          ls -la updates/broken
           df -h /
       - name: Drop the images older runs left
         # each one is several G and the account has a storage quota. the upload below replaces them,
@@ -543,6 +551,16 @@ jobs:
             --exchange 1G --log serial.log --splash splash.png --desktop desktop.png --lens \
             --updates updates.img --backup backup.img --clone clone.img --stick stick.img \
             --locked locked.img --flatpak test-flatpak --appimage test-appimage --timeout 2400
+      - name: Install an update as a delta
+        # a drive fresh off the image, running slot a with slot b empty, and the updates drive
+        # beside it. rift update seeds from the slot it is running, fetches only the chunks it is
+        # missing out of the chunk store on that drive, makes the verity tree itself and writes
+        # slot b, and the vm reboots into it (ADR-0089). the step above installs the same version
+        # from its whole files with systemd-sysupdate, which is the other way in
+        run: |
+          df -h .
+          python3 tools/boot-test.py vm/bin/rift-vm rift.raw.zst pass.txt --updates updates.img \
+            --delta --log delta.log --timeout 1800
       - name: Boot a drive that makes persist at its first boot
         # rift-flash leaves persist out, the way it writes a drive on macos and windows. the drive
         # asks for a passphrase over serial, makes persist and formats its exchange partition, and the
@@ -593,6 +611,7 @@ jobs:
           name: boot-serial-${{ github.sha }}
           path: |
             serial.log
+            delta.log
             first-boot.log
             graphical.log
             boot-style.log

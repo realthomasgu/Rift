@@ -6,7 +6,10 @@
 //! to replace it. `Backups`, `Backup` and `RestoreBackup` do the same with the backups on the
 //! backup disk, and `Target` says which folder on which disk they go to. `BootStyle` and
 //! `SetBootStyle` read and write the word on the esp that says how the next boot looks, which only
-//! root can reach. `Owner`, `SetOwnerName` and `SetOwnerPassword` read and change the owner's name
+//! root can reach. `Slots` says what the drive's two slots hold, `NextVersion` what an update
+//! would do, and `Update` installs it into the slot that is not running, which writes a partition
+//! of the drive and so answers the owner and root alone.
+//! `Owner`, `SetOwnerName` and `SetOwnerPassword` read and change the owner's name
 //! and password, and answer the owner and root alone. `AutoUnlock` and `SetAutoUnlock` say whether
 //! this machine's tpm holds a key for persist and seal one to it or wipe it, and answer the owner
 //! and root alone too. `SecurityKeys` and `RemoveSecurityKey` say which security keys open persist
@@ -39,6 +42,7 @@ use crate::restore::{self, Account, Outcome, Problem};
 use crate::slots::Drive;
 use crate::timeline::{self, Timeline};
 use crate::tpm::{Refusal as SealRefusal, Sealed};
+use crate::update::Updater;
 
 /// The object that answers on the bus.
 pub struct Vault {
@@ -51,6 +55,18 @@ pub struct Vault {
     sealed: Arc<Sealed>,
     keys: Arc<Keys>,
     exchange: Arc<Exchange>,
+    updater: Arc<Updater>,
+}
+
+impl Vault {
+    /// The three the two update methods need, cloned for the thread they run on.
+    fn drive_esp_updater(&self) -> (Arc<Drive>, Arc<Esp>, Arc<Updater>) {
+        (
+            Arc::clone(&self.drive),
+            Arc::clone(&self.esp),
+            Arc::clone(&self.updater),
+        )
+    }
 }
 
 /// What a method answers with when this boot is a Ghost one: the one sentence the mode says, as
@@ -75,6 +91,8 @@ const RESTORE_BACKUP: &str = "A file cannot be restored from a backup";
 const BOOT_STYLE: &str = "How the next boot looks cannot be read";
 const SET_BOOT_STYLE: &str = "How the next boot looks cannot be changed";
 const SLOTS: &str = "What this drive holds cannot be read";
+const NEXT_VERSION: &str = "What is waiting to be installed cannot be read";
+const UPDATE: &str = "An update cannot be installed";
 const OWNER_NAME: &str = "The owner's name cannot be changed";
 const OWNER_PASSWORD: &str = "The password cannot be changed";
 const UNLOCKING: &str = "What opens the drive cannot be read";
@@ -84,6 +102,7 @@ const REMOVE_KEY: &str = "A security key cannot be taken off the drive";
 /// What the owner and root alone may do, which finishes the sentence anyone else is refused with.
 const THE_OWNER: &str = "see or change the owner's name and password";
 const THE_EXCHANGE: &str = "mount the drive's exchange partition";
+const THE_UPDATE: &str = "install an update, which writes a partition of the drive";
 
 #[zbus::interface(name = "dev.rift.Vault")]
 impl Vault {
@@ -376,6 +395,61 @@ impl Vault {
             .map_err(fdo::Error::Failed)
     }
 
+    /// What an update would do, with nothing written: the version waiting where updates come from,
+    /// the version running and its slot, the slot the new one would go into, where it comes from,
+    /// how many bytes it is and how many of them this drive does not have yet.
+    ///
+    /// Working that out means reading the index of the slot this drive runs, and a drive that was
+    /// flashed and never updated has none kept, so the first call on such a drive reads the whole
+    /// running partition to make one. It is kept after that.
+    #[zbus(out_args("version", "running", "running_slot", "slot", "from", "total", "fetch"))]
+    async fn next_version(&self) -> fdo::Result<librift::update::Waiting> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(NEXT_VERSION));
+        }
+        let (drive, esp, updater) = self.drive_esp_updater();
+        blocking::unblock(move || {
+            let slots = drive.slots(&esp)?;
+            updater.next(&slots, &esp).map(|plan| plan.answer())
+        })
+        .await
+        .map_err(fdo::Error::Failed)
+    }
+
+    /// Installs the version waiting where updates come from into the slot that is not running: its
+    /// store, the verity tree over it, the names of the two partitions and its uki on the esp.
+    /// Returns the version, the slot it went into, the bytes fetched and the bytes taken from the
+    /// slot this drive runs.
+    ///
+    /// It writes a partition of the drive, which nothing but flashing and cloning has done before,
+    /// so it only ever writes the slot that is not running, and the uki that makes that slot
+    /// bootable goes on last, after the root hash of the tree it made matches the published one.
+    #[zbus(out_args("version", "slot", "fetched", "seeded"))]
+    async fn update(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<librift::update::Installed> {
+        if librift::ghost::on() {
+            return Err(in_ghost_mode(UPDATE));
+        }
+        owner_or_root(&header, connection, &self.owner, THE_UPDATE).await?;
+        let (drive, esp, updater) = self.drive_esp_updater();
+        blocking::unblock(move || {
+            let slots = drive.slots(&esp)?;
+            updater.write(&slots, &esp, &mut |line| println!("vault: {line}"))
+        })
+        .await
+        .map(|written| {
+            println!(
+                "vault: version {} is in slot {}",
+                written.version, written.slot
+            );
+            written.answer()
+        })
+        .map_err(fdo::Error::Failed)
+    }
+
     /// Whether this machine's tpm holds a key for persist: `on` here, `elsewhere` when the key was
     /// sealed on another machine, `off` when no machine holds one. The second value is that other
     /// machine's fingerprint, and the third says whether this machine has a tpm at all.
@@ -594,31 +668,36 @@ fn answer(
     Ok((outcome.name().to_string(), written.display().to_string()))
 }
 
+/// What the service answers questions about, which `main` builds from where everything is.
+pub struct Parts {
+    pub timeline: Timeline,
+    pub backups: Backups,
+    pub home: PathBuf,
+    pub esp: Esp,
+    pub drive: Drive,
+    pub sealed: Sealed,
+    pub keys: Keys,
+    pub updater: Updater,
+}
+
 /// Takes the name and answers until the process is stopped.
 ///
 /// # Errors
 ///
 /// When the system bus is not there, or another process already owns the name.
-pub fn serve(
-    timeline: Timeline,
-    backups: Backups,
-    home: PathBuf,
-    esp: Esp,
-    drive: Drive,
-    sealed: Sealed,
-    keys: Keys,
-) -> zbus::Result<()> {
-    backups.clear();
+pub fn serve(parts: Parts) -> zbus::Result<()> {
+    parts.backups.clear();
     let component = Component::Vault;
     let vault = Vault {
-        timeline: Arc::new(timeline),
-        backups: Arc::new(backups),
-        home: Arc::new(home),
-        esp: Arc::new(esp),
-        drive: Arc::new(drive),
+        timeline: Arc::new(parts.timeline),
+        backups: Arc::new(parts.backups),
+        home: Arc::new(parts.home),
+        esp: Arc::new(parts.esp),
+        drive: Arc::new(parts.drive),
         owner: Arc::new(Owner::system()),
-        sealed: Arc::new(sealed),
-        keys: Arc::new(keys),
+        sealed: Arc::new(parts.sealed),
+        keys: Arc::new(parts.keys),
+        updater: Arc::new(parts.updater),
         // the one part built here rather than passed in, the way the owner is: every place it
         // looks is the running drive's own and there is nothing for a caller to choose
         exchange: Arc::new(Exchange::default()),
@@ -643,6 +722,8 @@ mod tests {
             SNAPSHOTS,
             TAKE,
             RESTORE,
+            NEXT_VERSION,
+            UPDATE,
             BACKUPS,
             BACKUP,
             RESTORE_BACKUP,

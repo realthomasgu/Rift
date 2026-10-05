@@ -78,6 +78,17 @@ impl Esp {
         read
     }
 
+    /// The esp, mounted under the runtime directory until it is unmounted or dropped. An update
+    /// holds it over several steps, so it mounts it itself rather than through one of the methods
+    /// above.
+    ///
+    /// # Errors
+    ///
+    /// A sentence when the esp is not there or could not be mounted.
+    pub fn mounted(&self) -> Result<Mounted, String> {
+        self.mount()
+    }
+
     /// Mounts the esp under the runtime directory. It is mounted at /boot as well, on an automount
     /// that comes and goes, and the same vfat mounted twice is one file system either way.
     ///

@@ -1,5 +1,5 @@
-# vault: timeline snapshots of home, rustic backups, drive cloning, and the owner's name and
-# password. vault serve answers on the system bus as dev.rift.Vault and a timer takes a snapshot
+# vault: timeline snapshots of home, rustic backups, drive cloning, updates into the slot that is
+# not running, and the owner's name and password. vault serve answers on the system bus as dev.rift.Vault and a timer takes a snapshot
 # every hour. backups go to a folder on another disk that sudo vault target chooses. sudo rift clone
 # writes a second drive onto a removable disk, as root in the terminal, not through the service
 {
@@ -97,10 +97,14 @@ in
       path = [
         pkgs.btrfs-progs
         pkgs.rustic
+        # sfdisk, which names the two partitions of a slot an update has written
         pkgs.util-linux
-        # reading the header of persist, to see whether a key is sealed to this machine's tpm.
-        # systemd-cryptenroll, which seals and wipes it, comes with systemd on the default path
+        # reading the header of persist, to see whether a key is sealed to this machine's tpm, and
+        # veritysetup, which makes the hash tree over a slot an update has written.
+        # systemd-cryptenroll, which seals and wipes a key, comes with systemd on the default path
         pkgs.cryptsetup
+        # the chunks a published version is made of, into the slot that is not running (ADR-0089)
+        pkgs.desync
       ];
       serviceConfig = {
         Type = "dbus";

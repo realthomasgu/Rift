@@ -113,6 +113,13 @@ three times. Each of those boots comes up to the shell, the check fails, nothing
 and systemd-boot has taken one more try off its uki: +2-1, +1-2, +0-3. The fourth boot runs next from
 slot b again, and sysupdate still lists broken as installed.
 
+With --updates --delta the same next version is installed the other way in, by `rift update`: it
+reads the index of each published file off the updates drive, seeds from the slot this boot runs,
+fetches only the chunks it is missing out of the chunk store there, makes the verity tree itself and
+writes slot b (ADR-0089). The test prints what it fetched against what the whole files would have
+cost, checks the table on the drive, has systemd-sysupdate read back what is installed, and reboots
+into the new version. It ends there: the other checks belong to the run without --delta.
+
 With --models the files in that directory go into the @models subvolume before boot. The test waits
 on the system bus until quasard has loaded the model it picked for orbit's tier, checks that it is the
 one in the directory, asks the local api for a short completion and asks quasar a question over the bus
@@ -235,6 +242,12 @@ def without_console(output):
     runs and without blank lines at either end. Where a journal line cut a line of the command's in
     two, the two halves are one line again."""
     return JOURNAL.sub("", output).strip("\n")
+
+
+def spaced(printed):
+    """What a command printed with every run of whitespace a single space, so a sentence the shell
+    wrapped over two lines is one line again."""
+    return " ".join(printed.split())
 
 
 def first(paths):
@@ -653,7 +666,8 @@ SETTINGS_KEYS = ("page", "theme", "accent", "wallpaper", "gaps", "radius", "text
                  "input-volume", "input-mute", "input", "inputs", "battery", "ai", "model", "models",
                  "tier", "search", "search-model", "indexed", "index", "indexing", "snapshots",
                  "snapshot", "backups", "backup", "backup-folder", "taking", "backing", "version",
-                 "slot", "slot-a", "slot-b", "tries-a", "tries-b", "updates", "waiting", "timezone",
+                 "slot", "slot-a", "slot-b", "tries-a", "tries-b", "updates", "waiting", "next",
+                 "fetch", "total", "installing", "timezone",
                  "ntp", "synchronized", "rtc", "time", "date", "locale", "language", "formats",
                  "paper", "keymap", "layout", "printers", "printer", "default-printer", "jobs", "job",
                  "screen-reader", "on-screen-keyboard", "layouts", "console-keymap", "mice", "touchpads",
@@ -1579,6 +1593,10 @@ def main():
     ap.add_argument("--lens", action="store_true", help="expect lens's bar on the desktop")
     ap.add_argument("--updates", help="an ext4 image labelled updates with a newer version's update files, "
                     "install them and reboot into that version")
+    ap.add_argument("--delta", action="store_true",
+                    help="install the version on the updates drive with rift update, as a delta seeded from the "
+                         "slot this boot runs, instead of with systemd-sysupdate from its whole files. Needs "
+                         "--updates, and the test ends after the reboot into the new version")
     ap.add_argument("--backup", help="an empty ext4 image labelled backup, back up home onto it and restore from it")
     ap.add_argument("--clone", help="an empty file of at least 24G, clone the drive onto it as a removable disk "
                     "and boot the clone")
@@ -1604,6 +1622,8 @@ def main():
     args = ap.parse_args()
     if args.boot_style and not args.splash:
         ap.error("--boot-style needs --splash, which names the png its screendumps are saved beside")
+    if args.delta and not args.updates:
+        ap.error("--delta installs the version on the updates drive, so it needs --updates")
     if args.tpm and args.first_boot:
         ap.error("--tpm writes the drive with its persist, so it does not go with --first-boot")
     if args.ghost and args.first_boot:
@@ -3209,6 +3229,146 @@ def main():
            f"/usr runs from slot a on {parts[2][0]}")
 
     running = check_slots()
+
+    # 2b1. the delta. the updates drive holds the next version as an index per published file and the
+    # chunks those files are made of. `rift update` asks Vault, which seeds from the slot this boot
+    # runs, fetches only the chunks it is missing, makes the verity tree itself, checks its root hash
+    # against the published one and writes slot b (ADR-0089). step 7 installs the same version the
+    # other way in, from its whole files with systemd-sysupdate, and that is the one 0017 promised
+    if args.delta:
+        status, output = run(f"sudo mkdir -p {UPDATES_DRIVE} {UPDATES}; "
+                             f"and sudo mount -o ro /dev/disk/by-label/updates {UPDATES_DRIVE}; "
+                             f"and sudo mount --bind -o ro {UPDATES_DRIVE}/next {UPDATES}; and ls -1 {UPDATES}",
+                             "the update files for the delta")
+        names = without_console(output).split()
+        if status != 0:
+            fail(f"next on the updates drive could not be mounted on {UPDATES}: "
+                 f"{without_console(output).strip()[-300:]!r}")
+        print(f"\nboot-test: {UPDATES} holds:\n" + "\n".join(names), flush=True)
+        new = next((found.group(1) for found in (re.fullmatch(r"rift_([^_]+)\.efi", name) for name in names)
+                    if found), None)
+        if not new or version_key(new) <= version_key(running):
+            fail(f"next on the updates drive has no uki of a version after {running}: {names}")
+        for wanted in (f"rift_{new}.efi.caibx", f"rift_{new}.store.roothash", "chunks"):
+            if wanted not in names:
+                fail(f"next on the updates drive has no {wanted}: {names}")
+        index = next((name for name in names
+                      if re.fullmatch(rf"rift_{re.escape(new)}_[0-9a-fA-F-]{{36}}\.store\.caibx", name)), None)
+        if not index:
+            fail(f"next on the updates drive has no index of the store of {new}: {names}")
+        # the uuids the two partitions of the slot have to end up with are the two halves of the
+        # root hash, and the index's name carries the first of them
+        _, output = run(f"cat {UPDATES}/rift_{new}.store.roothash", "the published root hash")
+        root_hash = without_console(output).strip().splitlines()[0].strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", root_hash):
+            fail(f"{UPDATES}/rift_{new}.store.roothash holds {root_hash!r}, expected 64 hex digits")
+        halves = [root_hash[:32], root_hash[32:]]
+        store_uuid, verity_uuid = (f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}" for h in halves)
+        if index != f"rift_{new}_{store_uuid}.store.caibx":
+            fail(f"the index of the store of {new} is {index}, and the root hash says its partition is "
+                 f"{store_uuid}")
+
+        # what the whole files cost, for the line this step prints at the end
+        _, output = run(f"stat -Lc %s {UPDATES}/rift_{new}_*.store.zst {UPDATES}/rift_{new}_*.verity.zst "
+                        f"{UPDATES}/rift_{new}.efi", "what the version costs as whole files")
+        whole = sum(int(word) for word in without_console(output).split() if word.isdigit())
+        if whole < 1024**3:
+            fail(f"the whole files of {new} come to {whole} bytes: {without_console(output).strip()!r}")
+
+        # --check writes nothing: it says which version is waiting, how much of it this drive has
+        # and the slot it would go into. a drive straight off the image has no index of the slot it
+        # runs, so this reads the whole partition to make one, which is the slowest way in
+        status, output = run("rift update --check", "rift update --check")
+        plan = without_console(output)
+        print(f"\nboot-test: rift update --check printed:\n{plan}", flush=True)
+        if status != 0:
+            fail(f"rift update --check exited with {status}")
+        for wanted in (f"This drive runs {running} from slot A.",
+                       f"Version {new} is waiting in {UPDATES}.",
+                       "has to be fetched.",
+                       "It goes into slot B, and"):
+            if wanted not in spaced(plan):
+                fail(f"rift update --check did not say {wanted!r}")
+        # it reads the index of each file, so the numbers are exact: the fetch is a fraction of the
+        # whole, which is the whole point of P3.3
+        fetch = re.search(r"so ([\d.]+) (MiB|GiB) has to be fetched", spaced(plan))
+        if not fetch:
+            fail(f"rift update --check said no number to fetch: {plan.strip()[-400:]!r}")
+        fetched = int(float(fetch.group(1)) * (1024**2 if fetch.group(2) == "MiB" else 1024**3))
+        if not 0 < fetched < whole // 2:
+            fail(f"rift update --check says {fetch.group(0)!r} of a version that is {whole} bytes whole, "
+                 f"expected well under half of it")
+        ukis_on_esp([f"rift_{running}.efi"], "after rift update --check, which writes nothing")
+        ok(f"rift update --check says {new} is waiting and {fetch.group(1)} {fetch.group(2)} of it has to be "
+           f"fetched, against {whole} bytes as whole files")
+
+        # and now the install. it writes the store into slot b, makes the tree, names the two
+        # partitions and puts the uki on the esp last of all
+        started = time.monotonic()
+        status, output = run("rift update", "rift update")
+        took = time.monotonic() - started
+        printed = without_console(output)
+        print(f"\nboot-test: rift update printed:\n{printed}", flush=True)
+        if status != 0:
+            _, log = run("journalctl -b -u vault --no-pager -n 40 -o cat | cat", "vault's journal")
+            fail(f"rift update exited with {status}: {without_console(log).strip()[-1200:]!r}")
+        for wanted in (f"Version {new} is in slot B now",
+                       "taken from the slot this drive runs",
+                       "It has three boots to prove itself."):
+            if wanted not in spaced(printed):
+                fail(f"rift update did not say {wanted!r}")
+
+        # all tries left and none done, the same uki name sysupdate writes
+        fresh = f"rift_{new}+{TRIES}-0.efi"
+        ukis_on_esp([f"rift_{running}.efi", fresh], "after the delta install")
+
+        # the table on the drive itself: slot b carries the version and the two uuids made from the
+        # root hash, and slot a has not moved
+        _, output = run("sudo sfdisk --dump /dev/(lsblk -no PKNAME /dev/disk/by-designator/esp)",
+                        "the partition table after the delta install")
+        table = [(name, uuid.lower()) for uuid, name in
+                 re.findall(r'uuid=([0-9A-Fa-f-]{36}), name="([^"]*)"', without_console(output))]
+        wanted = [(f"store-verity_{new}", verity_uuid), (f"store_{new}", store_uuid)]
+        if table[3:5] != wanted or [name for name, _ in table[1:3]] != [f"store-verity_{running}",
+                                                                        f"store_{running}"]:
+            fail(f"the partitions after the delta install are {table}, expected {wanted} in slot b and "
+                 f"{running} still in slot a")
+
+        # systemd-sysupdate reads the partitions and the esp, not the source, so this is an
+        # independent reading of what Rift just wrote (ADR-0089)
+        _, output = run("sudo systemd-sysupdate --offline --json=short list", "systemd-sysupdate list after the delta")
+        found = re.search(r'^\{"current.*\}\s*$', without_console(output), re.M)
+        listing = json.loads(found.group(0)) if found else {}
+        if listing.get("current") != new or sorted(listing.get("all", []), key=version_key) != sorted(
+                [running, new], key=version_key):
+            fail(f"systemd-sysupdate lists {without_console(output).strip()[-600:]!r} after the delta install, "
+                 f"expected {new} current and {running} installed next to it")
+        # the index of the new version is kept, so the update after this one seeds from it
+        status, _ = run(f"sudo test -f /var/lib/rift/vault/indexes/rift_{new}.store.caibx",
+                        "the index kept on persist")
+        if status != 0:
+            fail(f"the index of {new} was not kept on persist for the next update")
+        run(f"sudo umount {UPDATES} {UPDATES_DRIVE}", "unmounting the updates drive")
+        ok(f"rift update wrote {new} into slot b in {took:.0f}s, made its hash tree, named both "
+           f"partitions and put {fresh} on the esp, and sysupdate lists both versions")
+
+        # the slot it wrote has to boot, which is the whole proof
+        reboot_action("reset")
+        child.send("sudo systemctl reboot\r")
+        expect([PASSPHRASE], "the luks passphrase prompt after the delta install")
+        unlock()
+        reboot_action("shutdown")
+        after = check_slots(slot="b", other=running)
+        if after != new:
+            fail(f"the vm came back running {after} after the delta install, expected {new}")
+        saved = whole - fetched
+        print(f"\nboot-test: a delta of {new} fetched about {fetched} bytes where the whole files are "
+              f"{whole}, so it sent {100 * fetched // max(whole, 1)} percent of a version and spared "
+              f"{saved} bytes", flush=True)
+        ok(f"rebooted into {new} from the slot rift update wrote, {running} stays in slot a")
+        power_off()
+        print(f"\nboot-test: PASSED in {since()}", flush=True)
+        return
 
     # 2c. the drive rift-flash wrote. persist is luks2 with argon2id, the settings a person gets, and
     # its btrfs has every subvolume and the owner's home. with --exchange the exchange partition is an
@@ -9059,9 +9219,6 @@ def main():
     fetch = f"curl -s -m 4 {url}"
     fetcher = "/home/rift/fetcher"
 
-    def spaced(printed):
-        return " ".join(printed.split())
-
     for _ in range(20):
         status, output = run(fetch, "the test server from the vm")
         if status == 0 and net_words in output:
@@ -9856,13 +10013,27 @@ def main():
             updates_names = mount_updates("next", "the update files for the Updates page")
             updates_waiting = updates_state("the version waiting on the Updates page",
                                             lambda found: found.get("waiting", "none") != "none")
-            umount_updates("unmounting the updates drive again")
             if not updates_waiting or version_key(updates_waiting["waiting"]) <= version_key(running):
                 said = settings_state("the Updates page once more").get("waiting")
+                umount_updates("unmounting the updates drive again")
                 fail(f"the Updates page says waiting {said!r} with {len(updates_names)} update files "
                      f"in {UPDATES}, expected a version after {running}")
+            # and what it would cost, which Vault works out from the index of each published file
+            # against the slot this drive runs. the first answer reads that whole partition, so the
+            # page is given longer for it than for the slots
+            updates_cost = updates_state("what the update would cost on the Updates page",
+                                         lambda found: found.get("next", "none") != "none") or {}
+            umount_updates("unmounting the updates drive again")
+            time.sleep(2)
+            shot(f"{stem}-settings-updates-waiting{extension}", "updates-page-waiting")
+            if updates_cost.get("next") != updates_waiting["waiting"] or not 0 < int(
+                    updates_cost.get("fetch", 0)) < int(updates_cost.get("total", 0)) // 2:
+                fail(f"the Updates page says {updates_cost.get('next')!r} would be installed and "
+                     f"{updates_cost.get('fetch')} of {updates_cost.get('total')} bytes fetched, expected "
+                     f"{updates_waiting['waiting']} and well under half of it")
             ok(f"the Updates page says {running} runs from slot a with slot b empty, updates come from "
-               f"{UPDATES}, and {updates_waiting['waiting']} is waiting there")
+               f"{UPDATES}, {updates_waiting['waiting']} is waiting there and {updates_cost['fetch']} of "
+               f"{updates_cost['total']} bytes of it would be fetched")
 
         new = install("next", running, "b")
 

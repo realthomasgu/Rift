@@ -19,6 +19,8 @@ pub use gpt::{GPT_BYTES, Gpt, read_gpt, write_gpt};
 pub use guard::{Bus, Disk, Volume};
 pub use lsblk::{Block, LSBLK, confirmation, describe, disks_in, read_blocks, read_lsblk, refuse};
 pub use table::{ALIGN, Partition, Slot, Table, plan, random_uuid, read_table, script};
+// sizes read the same everywhere, so the one that writes them lives in the crate's own root
+pub use crate::size;
 
 /// A mebibyte.
 pub const MIB: u64 = 1 << 20;
@@ -81,18 +83,6 @@ pub fn needed(persist_used: u64, exchange: Option<u64>) -> u64 {
         + exchange.unwrap_or(0)
         + (persist_used + HEADROOM).max(LEAST_PERSIST)
         + SLACK
-}
-
-/// Bytes in GiB with one decimal, or in MiB below that.
-#[must_use]
-pub fn size(bytes: u64) -> String {
-    if bytes >= GIB - MIB / 2 {
-        let gib = u128::from(GIB);
-        let tenths = (u128::from(bytes) * 10 + gib / 2) / gib;
-        format!("{}.{} GiB", tenths / 10, tenths % 10)
-    } else {
-        format!("{} MiB", bytes.div_ceil(MIB))
-    }
 }
 
 /// The device of partition `number` on `disk`: `/dev/sdb1`, or `/dev/nvme0n1p1` when the disk's
@@ -161,12 +151,5 @@ mod tests {
         assert_eq!(passphrase_problem("eight888"), None);
         // characters, not bytes
         assert!(passphrase_problem(&"\u{e9}".repeat(7)).is_some());
-    }
-
-    #[test]
-    fn sizes_read_in_binary_units() {
-        assert_eq!(size(512 * MIB), "512 MiB");
-        assert_eq!(size(GIB), "1.0 GiB");
-        assert_eq!(size(12_163_072 * 512), "5.8 GiB");
     }
 }

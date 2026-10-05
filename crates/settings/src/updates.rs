@@ -1,10 +1,15 @@
 //! The Updates page: which version each slot of the drive holds, what the next boot would start,
-//! and where updates come from.
+//! where updates come from, and the button that installs the one that is waiting.
 //!
 //! None of that can be read without root. The esp is mounted for root alone and the labels that
 //! say which version is in which slot are on the drive itself, so Vault reads the lot and answers
 //! it in one call. That call mounts the esp, so the page asks for it when it comes up rather than
 //! when the window opens.
+//!
+//! The install is Vault's too: it writes the slot that is not running, which nothing but flashing
+//! and cloning has done before (ADR-0089). Both calls take a while, so each runs on a thread of
+//! its own, and they run one after another rather than beside each other, since both mount the
+//! esp.
 
 use std::fmt::Write as _;
 use std::thread;
@@ -19,17 +24,46 @@ use crate::ai::said;
 use crate::ghost;
 use crate::theme::Colors;
 use crate::ui::{Message, Settings};
-use crate::widgets::{GAP, fact, group, heading, note, setting};
+use crate::widgets::{GAP, action, fact, group, heading, note, setting};
+
+/// Ask Vault what this drive holds and what an update would do, one after the other: both mount
+/// the esp, and the window is not waiting for either.
+pub fn read() -> Task<Message> {
+    // the second task is built inside the closure, so its thread starts once the first has
+    // answered rather than beside it
+    held().then(|said| Task::done(said).chain(waiting_version()))
+}
 
 /// Ask Vault what this drive holds, on a thread of its own: it mounts the esp and reads the
-/// drive's partition table, and the window is not waiting for that.
-pub fn read() -> Task<Message> {
+/// drive's partition table.
+fn held() -> Task<Message> {
+    on_a_thread(vault::slots, Message::Slots)
+}
+
+/// Ask Vault what an update would do, on a thread of its own. On a drive that was flashed and
+/// never updated this reads the whole running partition to work out what it already holds, so it
+/// is the slower of the two.
+fn waiting_version() -> Task<Message> {
+    on_a_thread(vault::next_version, Message::Next)
+}
+
+/// Install the version that is waiting, then read both halves again: the slots have changed and so
+/// has what is waiting.
+pub fn install() -> Task<Message> {
+    on_a_thread(vault::update, Message::Installed).then(|said| Task::done(said).chain(read()))
+}
+
+/// Run `ask` on a thread of its own and turn what it answers into a message.
+fn on_a_thread<T: Send + 'static>(
+    ask: impl FnOnce() -> Result<T, String> + Send + 'static,
+    into: impl Fn(Result<T, String>) -> Message + Send + 'static,
+) -> Task<Message> {
     let (sender, receiver) = oneshot::channel();
     thread::spawn(move || {
-        let _ = sender.send(vault::slots());
+        let _ = sender.send(ask());
     });
-    Task::perform(receiver, |answered| {
-        Message::Slots(answered.unwrap_or_else(|_| Err("Vault did not answer.".to_string())))
+    Task::perform(receiver, move |answered| {
+        into(answered.unwrap_or_else(|_| Err("Vault did not answer.".to_string())))
     })
 }
 
@@ -56,6 +90,15 @@ pub fn state(state: &Settings) -> Vec<String> {
     }
     lines.push(format!("updates {}", or_none(where_from(&slots.source))));
     lines.push(format!("waiting {}", slots.newer().unwrap_or("none")));
+    if let Some(Ok(plan)) = state.next.as_ref() {
+        lines.push(format!("next {}", or_none(&plan.version)));
+        lines.push(format!("fetch {}", plan.fetch));
+        lines.push(format!("total {}", plan.total));
+    }
+    lines.push(format!(
+        "installing {}",
+        if state.installing { "on" } else { "off" }
+    ));
     lines
 }
 
@@ -101,7 +144,7 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
         }
         Some(Ok(slots)) => {
             page = page.push(on_the_drive(look, slots));
-            page = page.push(waiting(look, slots));
+            page = page.push(waiting(look, state, slots));
         }
     }
     page.push(firmware(look)).into()
@@ -131,8 +174,9 @@ fn on_the_drive<'a>(look: Colors, slots: &Slots) -> Element<'a, Message> {
     .into()
 }
 
-/// Where updates come from and whether one is waiting there.
-fn waiting<'a>(look: Colors, slots: &Slots) -> Element<'a, Message> {
+/// Where updates come from, whether one is waiting there, what it would cost and the button that
+/// installs it.
+fn waiting<'a>(look: Colors, state: &Settings, slots: &Slots) -> Element<'a, Message> {
     let mut rows = vec![if slots.source.is_empty() {
         fact(
             look,
@@ -155,14 +199,47 @@ fn waiting<'a>(look: Colors, slots: &Slots) -> Element<'a, Message> {
                 ),
             ),
         ));
+        rows.extend(costs(look, state));
+        rows.push(installing(look, state, slots));
     }
     column![
         heading(look, "Updates"),
         group(look, rows),
-        note(look, INSTALLING)
+        note(look, ANOTHER_SLOT)
     ]
     .spacing(8)
     .into()
+}
+
+/// What the update waiting costs, once Vault has worked it out. A sentence as a value, since it is
+/// too long to sit at the right end of a row.
+fn costs<'a>(look: Colors, state: &Settings) -> Option<Element<'a, Message>> {
+    match state.next.as_ref()? {
+        Ok(plan) if plan.waiting() => Some(fact(look, "Size", plan.line())),
+        Ok(_) => None,
+        Err(why) => Some(fact(look, "Size", why.clone())),
+    }
+}
+
+/// The row that installs: the button, and what is happening under it.
+fn installing<'a>(look: Colors, state: &Settings, slots: &Slots) -> Element<'a, Message> {
+    let waiting = slots.newer().is_some();
+    let under = match (state.installing, waiting, state.next.is_some()) {
+        (true, _, _) => WRITING,
+        (false, false, _) => NOTHING,
+        (false, true, false) => WORKING,
+        (false, true, true) => INSTALLED,
+    };
+    setting(
+        look,
+        "Install it",
+        Some(under),
+        action(
+            look,
+            "Install",
+            (waiting && !state.installing).then_some(Message::Install),
+        ),
+    )
 }
 
 /// Firmware, which is the machine's own and not the drive's.
@@ -211,10 +288,17 @@ const TWO_SLOTS: &str = "The drive keeps two versions. An update is written into
 const TRIES: &str = "The next boot starts the newest version that still has a try left. A new \
                      version gets three, and a start that does not reach the desktop takes one \
                      off, so a version that will not run gives way to the one in the other slot.";
-/// How an update is installed today, and why the page does not do it.
-const INSTALLING: &str = "Installing an update is sudo systemd-sysupdate from a terminal for now. \
-                          Settings will do it once updates come from a channel with a signature \
-                          this drive knows.";
+/// What installing one does, under the button.
+const INSTALLED: &str = "Only the parts this drive does not have already are fetched.";
+/// What the row says while Vault writes the slot.
+const WRITING: &str = "Writing the other slot. This takes a while, and nothing of the version you \
+                       are on now is touched.";
+/// And when there is nothing to install, or nothing worked out yet.
+const NOTHING: &str = "There is nothing newer in the folder updates come from.";
+const WORKING: &str = "Working out how much of it this drive already has.";
+/// What the group says under it, however it is drawn.
+const ANOTHER_SLOT: &str = "An update is written into the slot that is not running, so the version \
+                            you are on now is left alone, and the next boot starts the new one.";
 /// What a Ghost boot cannot do with the drive's slots and an update.
 const NO_SLOTS: &str = "What this drive holds cannot be read";
 const NO_UPDATE: &str = "An update cannot be brought in or installed";
@@ -284,6 +368,7 @@ mod tests {
                 "updates /var/lib/rift/updates",
                 // what is waiting is the version already in slot b
                 "waiting none",
+                "installing off",
             ]
         );
     }
@@ -300,6 +385,31 @@ mod tests {
                 "tries-b none",
                 "updates /var/lib/rift/updates",
                 "waiting 0.3.0",
+                "installing off",
+            ]
+        );
+    }
+
+    #[test]
+    fn what_an_update_would_cost_is_in_the_state_once_vault_has_worked_it_out() {
+        let mut held = settings(Some(Ok(drive())));
+        held.next = Some(Ok(librift::update::Plan {
+            version: "0.3.0".to_string(),
+            running: "0.1.0".to_string(),
+            running_slot: "a".to_string(),
+            slot: "b".to_string(),
+            from: "/var/lib/rift/updates".to_string(),
+            total: 6_015_943_552,
+            fetch: 521_248_768,
+        }));
+        held.installing = true;
+        assert_eq!(
+            state(&held)[8..],
+            [
+                "next 0.3.0",
+                "fetch 521248768",
+                "total 6015943552",
+                "installing on",
             ]
         );
     }
@@ -312,7 +422,16 @@ mod tests {
 
     #[test]
     fn the_sentences_are_sentences() {
-        for sentence in [TWO_SLOTS, TRIES, INSTALLING, FIRMWARE] {
+        for sentence in [
+            TWO_SLOTS,
+            TRIES,
+            ANOTHER_SLOT,
+            INSTALLED,
+            WRITING,
+            WORKING,
+            NOTHING,
+            FIRMWARE,
+        ] {
             assert!(sentence.ends_with('.'), "{sentence}");
             assert!(sentence.is_ascii(), "{sentence}");
         }

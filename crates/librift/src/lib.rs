@@ -80,7 +80,24 @@ pub mod suggested;
 pub mod time;
 pub mod update;
 pub mod vault;
+// the verity tree over a slot's store, which the drive makes itself for a slot it writes
+pub mod verity;
 pub mod wallpaper;
+
+/// Bytes in GiB with one decimal, or in MiB below that. Every size a person reads is written this
+/// way, from a drive's partitions to what an update fetches.
+#[must_use]
+pub fn size(bytes: u64) -> String {
+    const MIB: u64 = 1 << 20;
+    const GIB: u64 = 1 << 30;
+    if bytes >= GIB - MIB / 2 {
+        let gib = u128::from(GIB);
+        let tenths = (u128::from(bytes) * 10 + gib / 2) / gib;
+        format!("{}.{} GiB", tenths / 10, tenths % 10)
+    } else {
+        format!("{} MiB", bytes.div_ceil(MIB))
+    }
+}
 
 /// Version of the Rift workspace this crate was built from.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -199,6 +216,13 @@ mod tests {
     fn dbus_names_follow_the_prefix() {
         assert_eq!(Component::Quasar.dbus_name(), "dev.rift.Quasar");
         assert_eq!(Component::Quasar.dbus_path(), "/dev/rift/Quasar");
+    }
+
+    #[test]
+    fn sizes_read_in_binary_units() {
+        assert_eq!(size(512 * (1 << 20)), "512 MiB");
+        assert_eq!(size(1 << 30), "1.0 GiB");
+        assert_eq!(size(12_163_072 * 512), "5.8 GiB");
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! rift: the CLI. `host`, `ai`, `doctor`, `snapshot`, `backup` and `net` ask the same D-Bus
-//! services Lens uses, `clone` runs Vault as root, `run --sandbox` runs Airlock, `wallpaper`
+//! rift: the CLI. `host`, `ai`, `doctor`, `snapshot`, `backup`, `net` and `update` ask the same
+//! D-Bus services Lens uses, `clone` runs Vault as root, `run --sandbox` runs Airlock, `wallpaper`
 //! writes the owner's setting and Horizon's part of the config, and `guide` opens the guide that
 //! comes with the system. The other commands are only a line in the help so far.
 
@@ -16,6 +16,7 @@ mod search;
 mod session;
 mod snapshot;
 mod text;
+mod update;
 mod version;
 mod wallpaper;
 
@@ -25,8 +26,8 @@ use std::process::ExitCode;
 const COMMANDS: &[(&str, &str, &str)] = &[
     (
         "update",
-        "Download the next system image into the inactive slot",
-        "Phase 2",
+        "Install the next version into the slot that is not running",
+        "Phase 3",
     ),
     ("rollback", "Boot the previous system slot", "Phase 2"),
     (
@@ -92,6 +93,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--version" | "-V") => version::run(rest),
+        Some("update") => update::run(rest),
         Some("host") => host::run(rest),
         Some("ai") => ai::run(rest),
         Some("doctor") => doctor::run(rest),

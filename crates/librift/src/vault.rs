@@ -10,7 +10,7 @@ use std::time::Duration;
 #[cfg(feature = "bus")]
 use crate::boot::Style;
 #[cfg(feature = "bus")]
-use crate::update::{Answer, Slots};
+use crate::update::{Answer, Installed, Plan, Slots, Waiting, Written};
 #[cfg(feature = "bus")]
 use crate::{Component, bus};
 
@@ -37,6 +37,16 @@ const BOOT_STYLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long reading the two slots may take. Vault mounts the esp and reads the drive's table.
 #[cfg(feature = "bus")]
 const SLOTS_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long working out what an update would cost may take. A drive that was flashed and never
+/// updated has no index of the slot it is running, so the first answer reads the whole partition.
+#[cfg(feature = "bus")]
+const NEXT_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// How long installing an update may take: a whole store partition written over a slow link, and
+/// the verity tree over it made here.
+#[cfg(feature = "bus")]
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
 
 /// How long sealing a key to the tpm may take. cryptenroll reads the volume key out of a slot,
 /// which is argon2id over the passphrase, and then talks to the tpm.
@@ -293,6 +303,43 @@ pub fn slots() -> Result<Slots, String> {
         .call("Slots", &())
         .map_err(|e| bus::sentence(vault, e))?;
     Ok(Slots::from_answer(answer))
+}
+
+/// What an update would do, with nothing written: the version waiting, how much of it this drive
+/// already holds and how much has to be fetched. A plan with no version is nothing waiting, which
+/// is an answer and not a failure.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, when updates come from somewhere this version
+/// cannot fetch from, or when the drive could not be read.
+#[cfg(feature = "bus")]
+pub fn next_version() -> Result<Plan, String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(NEXT_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, vault)?;
+    let answer: Waiting = proxy
+        .call("NextVersion", &())
+        .map_err(|e| bus::sentence(vault, e))?;
+    Ok(Plan::from_answer(answer))
+}
+
+/// Installs the version that is waiting into the slot that is not running, and answers what it
+/// wrote.
+///
+/// # Errors
+///
+/// A sentence when the bus or Vault is not there, when nothing is waiting, or at the step that
+/// failed. Nothing of the running slot is touched by any of them.
+#[cfg(feature = "bus")]
+pub fn update() -> Result<Written, String> {
+    let vault = Component::Vault;
+    let connection = bus::connect(UPDATE_TIMEOUT)?;
+    let proxy = bus::proxy(&connection, vault)?;
+    let answer: Installed = proxy
+        .call("Update", &())
+        .map_err(|e| bus::sentence(vault, e))?;
+    Ok(Written::from_answer(answer))
 }
 
 /// Whether this drive has an exchange partition: the plain one every other computer can read.

@@ -9,7 +9,7 @@ use std::fs::{self, File};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use librift::disk::{GPT_BYTES, Partition, Table, USR_TYPE, read_gpt};
+use librift::disk::{GPT_BYTES, Partition, Table, USR_TYPE, USR_VERITY_TYPE, read_gpt};
 use librift::update::{self, Slot, Slots};
 
 use crate::boot::Esp;
@@ -79,18 +79,9 @@ impl Drive {
         })
     }
 
-    /// The partition table of the drive the esp is on, read off the drive itself. sfdisk would
-    /// say the same, but this asks nothing of a program that may not be there.
+    /// The partition table of the drive the esp is on, read off the drive itself.
     fn table(&self) -> Result<Table, String> {
-        let esp = fs::canonicalize(self.designators.join(ESP))
-            .map_err(|_| "The drive this system started from has no boot partition.".to_string())?;
-        let disk = disk_of(&esp)?;
-        let mut bytes = vec![0; GPT_BYTES];
-        File::open(&disk)
-            .and_then(|mut drive| drive.read_exact(&mut bytes))
-            .map_err(|e| format!("Could not read {}: {e}", disk.display()))?;
-        read_gpt(&bytes)
-            .map_err(|why| format!("Could not read the partitions of {}. {why}", disk.display()))
+        Ok(drive_table(&self.designators)?.1)
     }
 
     /// Where updates come from, out of the transfer files. Every part of a version comes from the
@@ -109,6 +100,53 @@ impl Drive {
             .find_map(|text| update::source_of(&text).map(ToString::to_string))
             .unwrap_or_default()
     }
+}
+
+/// The drive the running system started from and its partition table, read off the drive itself.
+/// sfdisk would say the same, but this asks nothing of a program that may not be there.
+///
+/// # Errors
+///
+/// A sentence when the drive has no boot partition, or its table could not be read.
+pub fn drive_table(designators: &Path) -> Result<(PathBuf, Table), String> {
+    let esp = fs::canonicalize(designators.join(ESP))
+        .map_err(|_| "The drive this system started from has no boot partition.".to_string())?;
+    let disk = disk_of(&esp)?;
+    let mut bytes = vec![0; GPT_BYTES];
+    File::open(&disk)
+        .and_then(|mut drive| drive.read_exact(&mut bytes))
+        .map_err(|e| format!("Could not read {}: {e}", disk.display()))?;
+    let table = read_gpt(&bytes)
+        .map_err(|why| format!("Could not read the partitions of {}. {why}", disk.display()))?;
+    Ok((disk, table))
+}
+
+/// The two partitions of each slot, slot a first: the verity partition and the store beside it, in
+/// the order the drive lays them out, with the number each has in the table.
+///
+/// # Errors
+///
+/// A sentence when the drive is not laid out in two slots.
+pub fn slot_partitions(table: &Table) -> Result<Vec<(usize, usize)>, String> {
+    let of = |kind: &str| -> Vec<usize> {
+        table
+            .partitions
+            .iter()
+            .enumerate()
+            .filter(|(_, partition)| partition.kind.eq_ignore_ascii_case(kind))
+            .map(|(index, _)| index + 1)
+            .collect()
+    };
+    let (verity, store) = (of(USR_VERITY_TYPE), of(USR_TYPE));
+    if verity.len() != SLOTS.len() || store.len() != SLOTS.len() {
+        return Err(format!(
+            "The drive this system started from has {} stores and {} hash trees, and a Rift drive \
+             has two of each.",
+            store.len(),
+            verity.len()
+        ));
+    }
+    Ok(verity.into_iter().zip(store).collect())
 }
 
 /// The version each slot holds, slot a first: the store partitions of the table, which are the
@@ -177,7 +215,7 @@ pub fn disk_of(partition: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use librift::disk::{ESP_TYPE, LINUX_TYPE, USR_VERITY_TYPE};
+    use librift::disk::{ESP_TYPE, LINUX_TYPE};
 
     fn partition(kind: &str, name: &str) -> Partition {
         Partition {
@@ -204,6 +242,18 @@ mod tests {
                 partition(LINUX_TYPE, "persist"),
             ],
         }
+    }
+
+    #[test]
+    fn the_two_partitions_of_each_slot_are_numbered_the_way_the_drive_lays_them_out() {
+        assert_eq!(
+            slot_partitions(&table("store_0.1.0", "store_0.2.0")).unwrap(),
+            [(2, 3), (4, 5)]
+        );
+        let mut one = table("store_0.1.0", "_empty");
+        one.partitions.remove(4);
+        let why = slot_partitions(&one).unwrap_err();
+        assert!(why.contains("has 1 stores and 2 hash trees"), "{why}");
     }
 
     #[test]

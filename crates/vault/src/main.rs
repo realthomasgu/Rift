@@ -20,6 +20,7 @@ mod restore;
 mod slots;
 mod timeline;
 mod tpm;
+mod update;
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -34,6 +35,7 @@ use restore::Source;
 use slots::Drive;
 use timeline::{Keep, Timeline};
 use tpm::Sealed;
+use update::Updater;
 
 /// What is snapshotted, where the snapshots go, and where the snapshotted subvolume is mounted.
 /// The last two are in librift, since Files reads a folder in a snapshot itself.
@@ -53,6 +55,9 @@ const DESIGNATORS: &str = "/dev/disk/by-designator";
 const CLONE_RUN: &str = "/run/vault-clone";
 /// The systemd-sysupdate transfer files, which say where updates come from.
 const TRANSFERS: &str = "/etc/sysupdate.d";
+/// Where the index of each version this drive installed is kept, so the update after it seeds from
+/// that index rather than reading a whole partition to make one.
+const INDEXES: &str = "/var/lib/rift/vault/indexes";
 /// The partition persist is on, by the label the image gives it: what a key sealed to a machine's
 /// tpm is sealed for.
 const PERSIST: &str = "/dev/disk/by-partlabel/persist";
@@ -93,6 +98,7 @@ struct Args {
     cloner: Cloner,
     esp: Esp,
     drive: Drive,
+    updater: Updater,
     sealed: Sealed,
     keys: Keys,
     home: PathBuf,
@@ -107,6 +113,7 @@ fn main() -> ExitCode {
         cloner,
         esp,
         drive,
+        updater,
         sealed,
         keys,
         home,
@@ -121,16 +128,22 @@ fn main() -> ExitCode {
         }
     };
 
-    if librift::ghost::on()
-        && let Some(what) = not_in_ghost_mode(&command)
-    {
-        eprintln!("{}", librift::ghost::cannot(what));
-        return ExitCode::FAILURE;
+    if let Some(code) = refused_in_ghost_mode(&command) {
+        return code;
     }
 
     let result = match command {
-        Command::Serve => bus::serve(timeline, backups, home, esp, drive, sealed, keys)
-            .map_err(|e| format!("vault: could not answer on the system bus: {e}")),
+        Command::Serve => bus::serve(bus::Parts {
+            timeline,
+            backups,
+            home,
+            esp,
+            drive,
+            sealed,
+            keys,
+            updater,
+        })
+        .map_err(|e| format!("vault: could not answer on the system bus: {e}")),
         Command::Take => took(&timeline),
         Command::Prune => pruned(&timeline),
         Command::List => listed(&timeline),
@@ -194,6 +207,14 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Says the mode and nothing else, when this boot is a Ghost one and the command is one of those
+/// that cannot run there.
+fn refused_in_ghost_mode(command: &Command) -> Option<ExitCode> {
+    let what = librift::ghost::on().then(|| not_in_ghost_mode(command))??;
+    eprintln!("{}", librift::ghost::cannot(what));
+    Some(ExitCode::FAILURE)
 }
 
 /// What a command cannot do in a Ghost boot, when it is one of the commands that cannot. Persist
@@ -512,6 +533,12 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
         },
         esp: Esp::new(PathBuf::from(DESIGNATORS), PathBuf::from(RUN)),
         drive: running_drive(),
+        updater: Updater {
+            designators: PathBuf::from(DESIGNATORS),
+            release: PathBuf::from(librift::release::PATH),
+            indexes: PathBuf::from(INDEXES),
+            run: PathBuf::from(RUN),
+        },
         sealed,
         keys,
         cloner: Cloner {

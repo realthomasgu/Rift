@@ -44,7 +44,10 @@ The system is assembled from nixpkgs with Nix, so each image is fully described 
 ### Immutable system and atomic updates
 
 - The operating system is a read-only Nix store in an EROFS file system, compressed with zstd and protected by dm-verity. A block that does not match its hash is refused rather than read.
-- The drive carries two system slots. systemd-sysupdate writes a new version into the inactive slot, so the running version is never modified during an update.
+- The drive carries two system slots. A new version is written into the inactive slot, so the running version is never modified during an update.
+- An update sends only the parts of a new version the drive does not already have. Each version is published as an index of content defined chunks, and `rift update` fetches the index, reads what it can out of the slot it is running, and fetches the rest. Two neighbouring versions share about nine chunks in ten.
+- The hash tree that dm-verity checks the store against is built on the drive rather than downloaded, and the version's signed root hash has to match it before the new slot can boot.
+- systemd-sysupdate installs a version from a directory of whole files as well, so a drive can be updated from artifacts built from this repository with no channel at all.
 - systemd-boot counts boot attempts for each new version. A version that fails to boot three times is set aside and the previous version starts again.
 - Each version boots as a unified kernel image on UEFI firmware, with the current stable Linux kernel.
 

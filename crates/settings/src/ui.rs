@@ -107,6 +107,11 @@ pub struct Settings {
     pub making: backups::Making,
     /// What the drive's two slots hold, once Vault has answered.
     pub slots: Option<Result<librift::update::Slots, String>>,
+    /// What an update would do, once Vault has worked it out: which version is waiting and how
+    /// much of it this drive has to fetch.
+    pub next: Option<Result<librift::update::Plan, String>>,
+    /// Whether an update is being installed now.
+    pub installing: bool,
     /// What timedated says about the clock and what `date` says the time is, once the Date and
     /// time page has read them, and again every minute while it is up.
     pub clock: Option<datetime::Reading>,
@@ -236,6 +241,12 @@ pub enum Message {
     BackedUp(Result<(), String>),
     /// What the drive's two slots hold now.
     Slots(Result<librift::update::Slots, String>),
+    /// What an update would do now.
+    Next(Result<librift::update::Plan, String>),
+    /// An update was asked for.
+    Install,
+    /// How installing it went.
+    Installed(Result<librift::update::Written, String>),
     /// What timedated and `date` say about the clock now. It travels behind a pointer, the way the
     /// pictures a service answers with do.
     Clock(Box<datetime::Reading>),
@@ -500,6 +511,8 @@ impl Settings {
             disk: None,
             making: backups::Making::default(),
             slots: None,
+            next: None,
+            installing: false,
             clock: None,
             zones: Vec::new(),
             finding: String::new(),
@@ -625,6 +638,21 @@ fn poke_the_shell() {
 
 /// What the owner asked for: a page, a press, a switch or a slider, from the window or from the
 /// socket. What a service answers back is in `answered`.
+/// A button whose work takes a while and runs on a thread of its own: pressing it again while it
+/// runs does nothing, and the flag that dims it stays on until the answer comes back.
+fn started(
+    problem: &mut Option<String>,
+    running: &mut bool,
+    work: fn() -> Task<Message>,
+) -> Task<Message> {
+    if *running {
+        return Task::none();
+    }
+    *problem = None;
+    *running = true;
+    work()
+}
+
 fn update(state: &mut Settings, message: Message) -> Task<Message> {
     match message {
         Message::Show(page) => return show(state, page),
@@ -657,20 +685,21 @@ fn update(state: &mut Settings, message: Message) -> Task<Message> {
         }
         Message::Index => return search::start(state),
         Message::Snapshot => {
-            if state.making.snapshot {
-                return Task::none();
-            }
-            state.problem = None;
-            state.making.snapshot = true;
-            return backups::take();
+            return started(
+                &mut state.problem,
+                &mut state.making.snapshot,
+                backups::take,
+            );
         }
         Message::BackUp => {
-            if state.making.backup {
-                return Task::none();
-            }
-            state.problem = None;
-            state.making.backup = true;
-            return backups::back_up();
+            return started(
+                &mut state.problem,
+                &mut state.making.backup,
+                backups::back_up,
+            );
+        }
+        Message::Install => {
+            return started(&mut state.problem, &mut state.installing, updates::install);
         }
         Message::Volume(side, level) => state.moving = Some((side, level)),
         Message::Volumed(side, level) => {
@@ -773,6 +802,7 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
         }
         Message::Snapshots(answer) => state.snapshots = Some(answer),
         Message::Slots(answer) => state.slots = Some(answer),
+        Message::Next(answer) => state.next = Some(answer),
         Message::Clock(reading) => state.clock = Some(*reading),
         Message::Region(picture) => state.region = Some(picture),
         Message::Printers(answer) => state.printers = Some(answer),
@@ -789,6 +819,10 @@ fn answered(state: &mut Settings, message: Message) -> Task<Message> {
         Message::Backups(answer) => state.disk = Some(answer),
         Message::Took(said) => {
             state.making.snapshot = false;
+            state.problem = said.err();
+        }
+        Message::Installed(said) => {
+            state.installing = false;
             state.problem = said.err();
         }
         Message::BackedUp(said) => {
