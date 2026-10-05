@@ -85,6 +85,10 @@ fn run(args: &[String]) -> ExitCode {
         eprintln!("rift run --sandbox runs a command as you, not as root. Run it without sudo.");
         return ExitCode::FAILURE;
     }
+    if let Some(why) = appimage_refusal(&request.command) {
+        eprintln!("{why}");
+        return ExitCode::FAILURE;
+    }
     match sandbox_line(&app, &request) {
         Ok(line) => {
             let error = Command::new("systemd-run").args(&line).exec();
@@ -96,6 +100,29 @@ fn run(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Why a sandbox cannot run this command, when it is an `AppImage`. An `AppImage` is an application
+/// in one file, and the program inside it asks for the loader and the libraries of an ordinary
+/// Linux root, which this system does not have: only `appimage-run` lays those folders out, and it
+/// does that in a user namespace of its own, which `--disable-userns` in the sandbox refuses. So
+/// the sandbox would start and bwrap inside it would fail with nothing a person can act on. It
+/// says so here instead, before anything is run.
+fn appimage_refusal(command: &[String]) -> Option<String> {
+    let program = command.first()?;
+    let path = Path::new(program);
+    librift::appimage::of(path).map(|_| {
+        let name = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or(program.as_str());
+        format!(
+            "{name} is an AppImage. A sandbox cannot run one: {} has to build the ordinary Linux \
+             folders the program inside it needs, and it builds them in a sandbox of its own that \
+             this one does not allow. Run the file on its own instead.",
+            librift::appimage::RUN
+        )
+    })
 }
 
 /// systemd-run's command line for a request: the app's scope, and in it `airlock start` with the
@@ -362,6 +389,31 @@ mod tests {
             }))
         );
         assert_eq!(parse_run(&args(&["--help"])), Ok(None));
+    }
+
+    #[test]
+    fn a_sandbox_refuses_an_appimage_by_its_first_bytes() {
+        let folder = std::env::temp_dir().join(format!("airlock-appimage-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).unwrap();
+        let image = folder.join("Thing.AppImage");
+        fs::write(
+            &image,
+            [
+                0x7f, b'E', b'L', b'F', 2, 1, 1, 0, b'A', b'I', 2, 0, 0, 0, 0, 0,
+            ],
+        )
+        .unwrap();
+        let said = appimage_refusal(&args(&[image.to_str().unwrap()])).unwrap();
+        assert!(said.starts_with("Thing.AppImage is an AppImage."), "{said}");
+        assert!(said.contains("appimage-run"), "{said}");
+        // a note somebody named like one is not one, and neither is an ordinary command
+        let note = folder.join("Notes.AppImage");
+        fs::write(&note, "Minutes of the meeting\n").unwrap();
+        assert_eq!(appimage_refusal(&args(&[note.to_str().unwrap()])), None);
+        assert_eq!(appimage_refusal(&args(&["ls", "-l"])), None);
+        assert_eq!(appimage_refusal(&[]), None);
+        let _ = fs::remove_dir_all(&folder);
     }
 
     #[test]
