@@ -33,23 +33,31 @@ pub type Answer = Result<Vec<Found>, String>;
 /// Something was typed in the field. The page follows the field: words enough to search for show
 /// what they find, and an empty field is the front page again.
 pub fn typed(state: &mut Store, words: String) -> Task<Message> {
+    if !looked(state, words) {
+        return Task::none();
+    }
+    // the letter after this one is usually a moment away, so the search waits for the words to
+    // settle
+    let when = state.typed;
+    Task::perform(async move { thread::sleep(WAIT) }, move |()| {
+        Message::Waited(when)
+    })
+}
+
+/// Put words in the field and count them. True when there are enough of them to look for.
+pub fn looked(state: &mut Store, words: String) -> bool {
     state.words = words;
     state.typed = state.typed.wrapping_add(1);
-    let when = state.typed;
     if state.words.trim().len() < SHORTEST {
         state.found = None;
         state.searching = false;
         if state.page == Page::Found {
             state.page = Page::Apps;
         }
-        return Task::none();
+        return false;
     }
     state.page = Page::Found;
-    // the letter after this one is usually a moment away, so the search waits for the words to
-    // settle
-    Task::perform(async move { thread::sleep(WAIT) }, move |()| {
-        Message::Waited(when)
-    })
+    true
 }
 
 /// Look for what is in the field now.

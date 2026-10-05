@@ -347,8 +347,9 @@ fn handle(state: &mut Store, message: Message) -> Task<Message> {
         Message::Typed(words) => return found::typed(state, words),
         Message::Find => return found::find(state),
         Message::Look(words) => {
-            let _ = found::typed(state, words);
-            return found::find(state);
+            if found::looked(state, words) {
+                return found::find(state);
+            }
         }
         Message::Waited(when) => return found::waited(state, when),
         Message::Searched(when, answer) => found::searched(state, when, *answer),
