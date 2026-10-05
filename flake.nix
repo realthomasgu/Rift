@@ -270,6 +270,8 @@
             broken-update = import ./nix/image/update.nix { inherit (broken) config pkgs; };
             # the flatpak runtime and app the boot test installs, as bundles
             test-flatpak = import ./nix/test-flatpak.nix { inherit pkgs; };
+            # an appimage of our own, which the boot test downloads and runs on the drive
+            test-appimage = import ./nix/test-appimage.nix { inherit pkgs; };
             # boots a drive in qemu. `nix run .#vm` hands it the image above, which rift-flash first
             # writes onto a drive in a file the way it writes a stick; the boot test does the same with
             # the image from the image job. the drive is nvme, not an emulated usb stick: qemu's usb
