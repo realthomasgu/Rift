@@ -1871,7 +1871,8 @@ def main():
             if lines is not None and ready(lines):
                 return lines
             if time.monotonic() > until:
-                _, output = run("journalctl -b -t store -o cat --no-pager | tail -n 20", "the Store's log")
+                _, output = run("journalctl -b --user-unit=rift-store.service -o cat --no-pager | tail -n 20",
+                                "the Store's log")
                 fail(f"the Store did not come to {what} in {seconds} s, its state is {lines!r}"[:2000]
                      + f". It logged: {without_console(output).strip()[-1000:]!r}")
             time.sleep(2)
@@ -9293,7 +9294,7 @@ def main():
             "the Store from the Applications menu")
         store_now = store_until(
             300, lambda lines: store_value(lines, "page") == "apps"
-            and (store_value(lines, "remotes") or "").startswith("flathub"),
+            and "flathub" in (store_value(lines, "remotes") or ""),
             "the front page with the remotes the drive has")
         store_remotes = store_value(store_now, "remotes")
         if "rift-test" not in (store_remotes or ""):
@@ -9307,18 +9308,20 @@ def main():
 
         # the field. the words are looked for in the appstream data of every remote, which flatpak
         # fetches the first time it is asked, so this is the one step that waits on Flathub
-        run("rift-store --set search editor", "editor typed into the Store's field")
+        run("rift-store --set search rift", "rift typed into the Store's field")
         store_now = store_until(
             600, lambda lines: store_value(lines, "searching") == "no"
-            and store_value(lines, "words") == "editor"
+            and store_value(lines, "words") == "rift"
             and ((store_value(lines, "rows") or "").isdigit() or store_value(lines, "rows-problem")),
-            "what the search for editor found")
+            "what the search for rift found")
         store_rows = [printed for printed in store_now if printed.startswith("row ")]
         if f"row {editor_id} {editor_name}" not in store_rows:
-            fail(f"the Store's search for editor did not find {editor_id} under its own name. It found "
-                 f"{len(store_rows)} rows: {store_rows[:12]}. {store_value(store_now, 'rows-problem') or ''}")
+            fail(f"the Store's search for rift did not find {editor_id} under its own name. It printed "
+                 f"{len(store_rows)} of {store_value(store_now, 'rows')} rows: {store_rows[:12]}. "
+                 f"{store_value(store_now, 'rows-problem') or ''}")
         store_picture(f"{flatpak_stem}-store-found{flatpak_extension}", "store-found")
-        ok(f"the Store's search for editor found {len(store_rows)} apps on the remotes, {editor_name!r} among them")
+        ok(f"the Store's search for rift found {store_value(store_now, 'rows')} apps on the remotes, "
+           f"{editor_name!r} among them")
 
         # the app's own page, before anything of it is installed
         run(f"rift-store --set open {editor_id}", f"the page of {editor_id}")

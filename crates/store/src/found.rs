@@ -24,6 +24,9 @@ const WAIT: Duration = Duration::from_millis(500);
 /// How few letters are not worth a search.
 const SHORTEST: usize = 2;
 
+/// How many of the rows `--state` prints.
+const ROWS: usize = 20;
+
 /// What a search found, or why it could not be made.
 pub type Answer = Result<Vec<Found>, String>;
 
@@ -114,7 +117,8 @@ pub fn lines(state: &Store) -> Vec<String> {
         Some(Err(why)) => said.push(format!("rows-problem {why}")),
         Some(Ok(found)) => {
             said.push(format!("rows {}", found.len()));
-            for one in found {
+            // a state is a state, not a log: a search of Flathub for a common word finds hundreds
+            for one in found.iter().take(ROWS) {
                 said.push(format!("row {} {}", one.id, one.name));
             }
         }
