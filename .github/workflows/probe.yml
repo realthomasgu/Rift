@@ -49,8 +49,8 @@ jobs:
           Type=usr
           Label=store_test
           CopyBlocks=$PWD/out/data.bin
-          Minimize=best
-          SizeMaxBytes=128M
+          SizeMinBytes=64M
+          SizeMaxBytes=64M
           Verity=data
           VerityMatchKey=store
           EOF
@@ -58,7 +58,7 @@ jobs:
           sudo "$repart" --empty=create --size=auto --seed="$seed" \
             --definitions=defs --json=pretty --dry-run=no out/test.raw | tee out/repart.json
           echo "repart: $?"
-          published=$(jq -r '.[] | select(.label | startswith("store_")) | .roothash' out/repart.json)
+          published=$(jq -r '.[] | .roothash | select(. != null and . != "" and . != "TBD")' out/repart.json | head -1)
           echo "the root hash repart published: $published"
           sudo chown "$(id -u)" out/test.raw
           echo "--- the partitions it made ---"
