@@ -15,12 +15,16 @@ jobs:
         run: |
           set +e
           # the image's own systemd, so this is the same repart that builds the store's verity tree.
-          # nix build, not nix eval: eval gives the path without putting anything there
-          systemd=$(nix build --no-link --print-out-paths \
+          # nix build, not nix eval: eval gives the path without putting anything there. the package
+          # has more than one output and the print lists them all, so pick the one with the binary
+          repart=
+          while read -r out; do
+            echo "output: $out"
+            [ -x "$out/bin/systemd-repart" ] && repart=$out/bin/systemd-repart
+          done < <(nix build --no-link --print-out-paths \
             '.#nixosConfigurations.rift.config.image.repart.package')
-          echo "systemd: $systemd"
-          ls "$systemd/bin" | grep -i repart
-          repart=$systemd/bin/systemd-repart
+          echo "repart: $repart"
+          [ -n "$repart" ] || { echo "no systemd-repart in the image's systemd"; exit 1; }
           V=$(nix build --inputs-from . nixpkgs#cryptsetup.bin --no-link --print-out-paths)/bin/veritysetup
           echo "veritysetup: $V"
           "$V" --version
