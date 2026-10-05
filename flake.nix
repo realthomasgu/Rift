@@ -61,6 +61,7 @@
             ./nix/profiles/welcome.nix
             ./nix/profiles/store.nix
             ./nix/profiles/files.nix
+            ./nix/profiles/appimage.nix
             ./nix/profiles/phase0.nix
           ];
         };
