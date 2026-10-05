@@ -251,6 +251,21 @@
               )
             ];
           };
+          # a version on again, with a quarter of a gibibyte of new incompressible content in the
+          # store, so a probe can see what a delta costs for the bytes that really changed
+          bulky = self.nixosConfigurations.rift.extendModules {
+            modules = [
+              (
+                { pkgs, ... }:
+                {
+                  system.image.version = bump 3;
+                  environment.etc."rift-probe-bulk".source = pkgs.runCommand "rift-probe-bulk" { } ''
+                    head -c 268435456 /dev/urandom > $out
+                  '';
+                }
+              )
+            ];
+          };
         in
         {
           packages = {
@@ -268,6 +283,8 @@
             update = import ./nix/image/update.nix { inherit (next) config pkgs; };
             # and the version after it, which is never marked good
             broken-update = import ./nix/image/update.nix { inherit (broken) config pkgs; };
+            # a version with a quarter of a gibibyte of new content, for the delta probe
+            bulky-update = import ./nix/image/update.nix { inherit (bulky) config pkgs; };
             # the flatpak runtime and app the boot test installs, as bundles
             test-flatpak = import ./nix/test-flatpak.nix { inherit pkgs; };
             # an appimage of our own, which the boot test downloads and runs on the drive

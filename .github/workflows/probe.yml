@@ -1,0 +1,225 @@
+name: welcome probe
+on:
+  workflow_dispatch:
+
+jobs:
+  delta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Allow user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: What the chunkers cost
+        run: |
+          set +e
+          df -h /
+          for p in casync desync zsync; do
+            echo "--- $p ---"
+            nix build --inputs-from . "nixpkgs#$p" -o "tool-$p" -L 2>&1 | tail -2
+            nix path-info --inputs-from . -S -h "nixpkgs#$p"
+            nix path-info --inputs-from . --json "nixpkgs#$p" | jq -r '.[] | "  own nar \(.narSize) bytes"'
+          done
+          nix build --inputs-from . nixpkgs#cryptsetup.bin -o cs -L 2>&1 | tail -2
+          ls cs/bin | head
+      - name: Build two neighbouring versions
+        run: nix build .#update .#broken-update -o ver -L --print-build-logs
+      - name: What a version is
+        run: |
+          set +e
+          ls -lL ver ver-1
+          echo "--- a ---"; cat ver/SHA256SUMS
+          echo "--- b ---"; cat ver-1/SHA256SUMS
+          df -h /
+      - name: Unpack the store and verity of each
+        run: |
+          set -e
+          mkdir -p work
+          pick() { ls "$1"/*."$2".zst | head -n1; }
+          for pair in "ver a" "ver-1 b"; do
+            set -- $pair
+            zstd -d -q -o "work/$2" "$(pick "$1" store)"
+            zstd -d -q -o "work/$2.verity" "$(pick "$1" verity)"
+            cp "$1"/*.efi "work/$2.efi"
+          done
+          ls -l work
+          df -h /
+      - name: What the verity superblock says
+        run: |
+          set +e
+          python3 - <<'PY'
+          import struct, uuid
+          for name in ("work/a.verity", "work/b.verity"):
+              head = open(name, "rb").read(4096)
+              sig, version, hash_type = struct.unpack_from("<8sII", head, 0)
+              uid = uuid.UUID(bytes=head[16:32])
+              algorithm = head[32:64].split(b"\0")[0].decode()
+              data_bs, hash_bs, blocks, salt_size = struct.unpack_from("<IIQH", head, 64)
+              salt = head[88:88 + salt_size].hex()
+              print(name)
+              print("  signature %r version %d hash type %d uuid %s" % (sig, version, hash_type, uid))
+              print("  %s, data block %d, hash block %d, %d data blocks (%d bytes)"
+                    % (algorithm, data_bs, hash_bs, blocks, blocks * data_bs))
+              print("  salt %s" % salt)
+          PY
+      - name: Does the layout line up at all
+        run: |
+          set +e
+          python3 - <<'PY'
+          import os
+          a, b = "work/a", "work/b"
+          sa, sb = os.path.getsize(a), os.path.getsize(b)
+          print("a %d bytes, b %d bytes, difference %d" % (sa, sb, sb - sa))
+          BUCKETS = 64
+          n = min(sa, sb)
+          for bs in (4096, 65536):
+              same = total = 0
+              first = last = None
+              hist = [0] * BUCKETS
+              with open(a, "rb") as fa, open(b, "rb") as fb:
+                  off = 0
+                  CH = 1 << 24
+                  while off < n:
+                      ca = fa.read(min(CH, n - off)); cb = fb.read(min(CH, n - off))
+                      if not ca:
+                          break
+                      for i in range(0, len(ca), bs):
+                          total += 1
+                          if ca[i:i + bs] == cb[i:i + bs]:
+                              same += 1
+                          else:
+                              o = off + i
+                              if first is None: first = o
+                              last = o
+                              hist[min(BUCKETS - 1, o * BUCKETS // n)] += 1
+                      off += len(ca)
+              print("%d byte blocks: %d of %d equal in place (%.2f percent)"
+                    % (bs, same, total, 100.0 * same / total))
+              print("  first differing offset %s, last %s" % (first, last))
+              print("  differing blocks per 1/64 of the image:")
+              print("  " + " ".join(str(h) for h in hist))
+          PY
+      - name: Chunk both
+        run: |
+          set +e
+          D=./tool-desync/bin/desync
+          for v in a b; do
+            echo "--- make $v ---"
+            mkdir -p "work/s-$v"
+            start=$(date +%s)
+            $D make --store "work/s-$v" "work/$v.caibx" "work/$v"
+            echo "make: $? in $(( $(date +%s) - start )) seconds"
+            echo "store: $(du -sb "work/s-$v" | cut -f1) bytes in $(find "work/s-$v" -name '*.cacnk' | wc -l) chunks"
+            echo "index: $(stat -c %s "work/$v.caibx") bytes"
+            $D info --store "work/s-$v" "work/$v.caibx"
+          done
+          df -h /
+      - name: The delta between them
+        run: |
+          set +e
+          delta() {
+            local from=$1 to=$2 out=$3
+            (cd "work/s-$from" && find . -name '*.cacnk' | sort) > "work/$from.list"
+            (cd "work/s-$to" && find . -name '*.cacnk' | sort) > "work/$to.list"
+            comm -13 "work/$from.list" "work/$to.list" > "work/new-$to.list"
+            comm -12 "work/$from.list" "work/$to.list" > "work/shared-$to.list"
+            echo "$from has $(wc -l < "work/$from.list") chunks, $to has $(wc -l < "work/$to.list")"
+            echo "shared $(wc -l < "work/shared-$to.list"), new in $to $(wc -l < "work/new-$to.list")"
+            mkdir -p "$out"
+            tar -C "work/s-$to" -cf - -T "work/new-$to.list" | tar -C "$out" -xf -
+            echo "delta $from to $to: $(du -sb "$out" | cut -f1) bytes"
+            echo "the whole of $to as chunks: $(du -sb "work/s-$to" | cut -f1) bytes"
+          }
+          delta a b work/delta
+          echo "b.store.zst on the wire today: $(stat -Lc %s ver-1/*.store.zst) bytes"
+          echo "b.verity.zst on the wire today: $(stat -Lc %s ver-1/*.verity.zst) bytes"
+          echo "b.efi on the wire today: $(stat -Lc %s ver-1/*.efi) bytes"
+      - name: Put b together from a and the delta alone
+        run: |
+          set +e
+          D=./tool-desync/bin/desync
+          start=$(date +%s)
+          $D extract --store work/delta --seed work/a.caibx work/b.caibx work/out
+          echo "extract: $? in $(( $(date +%s) - start )) seconds"
+          ls -l work/out work/b
+          cmp work/out work/b && echo "SAME as b" || echo "DIFFERENT from b"
+          rm -f work/out
+          df -h /
+      - name: The same question for verity and the uki
+        run: |
+          set +e
+          D=./tool-desync/bin/desync
+          for kind in verity efi; do
+            echo "=== $kind ==="
+            ls -l "work/a.$kind" "work/b.$kind"
+            mkdir -p work/v-a work/v-b
+            $D make --store work/v-a "work/a.$kind.caibx" "work/a.$kind"
+            $D make --store work/v-b "work/b.$kind.caibx" "work/b.$kind"
+            (cd work/v-a && find . -name '*.cacnk' | sort) > work/va.list
+            (cd work/v-b && find . -name '*.cacnk' | sort) > work/vb.list
+            echo "a $(wc -l < work/va.list) chunks, b $(wc -l < work/vb.list), shared $(comm -12 work/va.list work/vb.list | wc -l)"
+            comm -13 work/va.list work/vb.list > work/vn.list
+            mkdir -p work/d
+            tar -C work/v-b -cf - -T work/vn.list | tar -C work/d -xf -
+            echo "delta store: $(du -sb work/d | cut -f1) bytes of $(du -sb work/v-b | cut -f1)"
+            rm -rf work/v-a work/v-b work/d
+          done
+      - name: Can the drive make the verity tree itself
+        run: |
+          set +e
+          V=./cs/bin/veritysetup
+          echo "--- what veritysetup makes of the published tree ---"
+          $V dump work/b.verity
+          echo "dump: $?"
+          dump=$($V dump work/b.verity 2>/dev/null)
+          val() { printf '%s\n' "$dump" | awk -F: -v k="$1" 'index($0, k) == 1 { sub(/^[^:]*:[ \t]*/, ""); print; exit }'; }
+          db=$(val "Data block size")
+          hb=$(val "Hash block size")
+          salt=$(val "Salt")
+          blocks=$(val "Data blocks")
+          echo "data block $db, hash block $hb, blocks $blocks, salt $salt"
+          echo "--- make one from b's store and compare ---"
+          start=$(date +%s)
+          $V format --data-block-size="$db" --hash-block-size="$hb" \
+            --data-blocks="$blocks" --salt="$salt" work/b work/mine.verity
+          echo "format: $? in $(( $(date +%s) - start )) seconds"
+          ls -l work/mine.verity work/b.verity
+          cmp work/mine.verity work/b.verity && echo "SAME tree" || echo "DIFFERENT tree"
+          echo "--- and the root hash the uki would carry ---"
+          $V format --data-block-size="$db" --hash-block-size="$hb" \
+            --data-blocks="$blocks" --salt="$salt" work/b work/again.verity | grep -i "root hash"
+          rm -f work/mine.verity work/again.verity
+          df -h /
+      - name: A version with a quarter of a gibibyte of new content
+        run: |
+          set +e
+          nix build .#bulky-update -o bulky -L --print-build-logs 2>&1 | tail -5
+          ls -lL bulky
+          D=./tool-desync/bin/desync
+          zstd -d -q -o work/c "$(ls bulky/*.store.zst | head -n1)"
+          ls -l work/c work/b
+          mkdir -p work/s-c
+          start=$(date +%s)
+          $D make --store work/s-c work/c.caibx work/c
+          echo "make c: $? in $(( $(date +%s) - start )) seconds"
+          (cd work/s-b && find . -name '*.cacnk' | sort) > work/b.list
+          (cd work/s-c && find . -name '*.cacnk' | sort) > work/c.list
+          comm -13 work/b.list work/c.list > work/new-c.list
+          echo "b has $(wc -l < work/b.list) chunks, c has $(wc -l < work/c.list)"
+          echo "shared $(comm -12 work/b.list work/c.list | wc -l), new in c $(wc -l < work/new-c.list)"
+          mkdir -p work/delta-c
+          tar -C work/s-c -cf - -T work/new-c.list | tar -C work/delta-c -xf -
+          echo "delta b to c: $(du -sb work/delta-c | cut -f1) bytes"
+          echo "c.store.zst on the wire today: $(stat -Lc %s bulky/*.store.zst) bytes"
+          df -h /
