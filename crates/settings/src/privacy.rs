@@ -363,8 +363,8 @@ fn the_network<'a>(state: &'a Settings, look: Colors, now: &'a Picture) -> Eleme
 }
 
 /// One app Airlock lists: the name it is known by, how many of its sandboxes run, and its network
-/// switch. A Flatpak app is listed by its id, so its own name and icon come from its desktop entry
-/// when the drive has one.
+/// switch. Airlock knows a Flatpak app by its id, so the name here is its desktop entry's when the
+/// drive has one.
 fn sandbox_row<'a>(
     state: &'a Settings,
     look: Colors,

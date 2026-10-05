@@ -9583,7 +9583,10 @@ def main():
         net_last(120, "fetched", "the running app before its network was off")
         _, output = run(f"systemctl --user list-units --full --plain --no-legend 'app-flatpak-{app_id}-*' | cat",
                         "the running app's scope")
-        net_units = re.findall(rf"app-flatpak-{re.escape(app_id)}-\d+\.scope", without_console(output))
+        # flatpak gives its scope no description of its own, so systemd prints the unit's name
+        # twice in the row, once as the name and once as what it is
+        net_units = sorted(set(re.findall(rf"app-flatpak-{re.escape(app_id)}-\d+\.scope",
+                                          without_console(output))))
         print(f"\nboot-test: the user manager lists {net_units}", flush=True)
         if len(net_units) != 1:
             fail(f"the user manager lists {net_units} for {app_id}, expected the one scope of the running app")
@@ -9595,7 +9598,9 @@ def main():
         print(f"\nboot-test: sudo nft list table inet airlock printed:\n{net_table}", flush=True)
         if net_units[0] not in net_table:
             fail(f"airlock's table does not hold {net_units[0]}")
-        net_last(120, "nothing", "the running app after its network was off")
+        # a dropped packet is a wget that waits out its own 4 second timeout, where no network at
+        # all is refused at once, so this is the slow one
+        net_last(180, "nothing", "the running app after its network was off")
         net_until(("Flatpak", "Off", "1"), f"the switch with {app_id} off while it runs")
 
         # the Privacy page lists it under its own name, with the switch the page turns back on
