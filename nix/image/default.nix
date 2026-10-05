@@ -72,7 +72,10 @@ in
           SizeMaxBytes = "1G";
         };
       };
-      # a fixed 1G, enough for the hash tree of a full 8G store, so a later version fits here too
+      # a fixed 1G, enough for the hash tree of a full 8G store, so a later version fits here too.
+      # the tree is hashed in 4 KiB blocks, which is what veritysetup itself defaults to. repart
+      # would take the block size from the image's sector size, 512, and a tree over 512 byte blocks
+      # is eight times as big: 374 MiB of hashes to send with every version instead of 45 MiB
       "10-store-verity" = {
         repartConfig = {
           Type = "usr-verity";
@@ -80,6 +83,8 @@ in
           Minimize = "off";
           SizeMinBytes = "1G";
           SizeMaxBytes = "1G";
+          VerityDataBlockSizeBytes = "4096";
+          VerityHashBlockSizeBytes = "4096";
         };
       };
       # as small as what is in it, and the last partition, so the flash step can grow it to its 8G slot.

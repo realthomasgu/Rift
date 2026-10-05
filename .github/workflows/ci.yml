@@ -347,6 +347,19 @@ jobs:
             exit 1
           fi
           echo "::notice title=Store partition::$line"
+      - name: Report what a version costs on the wire
+        # the three files systemd-sysupdate installs a version from. this is the number an update
+        # has to cut, so every run prints it
+        run: |
+          total=0
+          for file in result-1/rift_*; do
+            bytes=$(stat -Lc %s "$file")
+            total=$((total + bytes))
+            echo "  $(numfmt --to=iec-i --suffix=B "$bytes") $(basename "$file")"
+          done
+          line="A version is $(numfmt --to=iec-i --suffix=B "$total") ($total bytes) on the wire"
+          echo "$line"
+          echo "::notice title=A version on the wire::$line"
       - name: Diagnose
         if: failure() && steps.build.outputs.failed == '1'
         run: |
