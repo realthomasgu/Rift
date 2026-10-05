@@ -77,16 +77,19 @@ jobs:
           "$V" dump out/tree.bin
           dump=$("$V" dump out/tree.bin 2>/dev/null)
           val() { printf '%s\n' "$dump" | awk -F: -v k="$1" 'index($0, k) == 1 { sub(/^[^:]*:[ \t]*/, ""); print; exit }'; }
-          db=$(val "Data block size"); hb=$(val "Hash block size")
-          salt=$(val "Salt"); blocks=$(val "Data blocks"); uid=$(val "UUID")
+          # dump prints "4096 [bytes]", and format wants the number on its own
+          db=$(val "Data block size" | awk '{print $1}')
+          hb=$(val "Hash block size" | awk '{print $1}')
+          salt=$(val "Salt"); blocks=$(val "Data blocks" | awk '{print $1}'); uid=$(val "UUID")
           echo "data block $db, hash block $hb, blocks $blocks"
           echo "uuid $uid"
           echo "salt $salt"
           echo "--- veritysetup format over the same data, with those parameters ---"
           "$V" format --data-block-size="$db" --hash-block-size="$hb" \
             --data-blocks="$blocks" --salt="$salt" --uuid="$uid" out/store.bin out/mine.bin \
-            | tee out/mine.txt
+            > out/mine.txt 2>&1
           echo "format: $?"
+          cat out/mine.txt
           mine=$(awk '/Root hash:/ { print $3 }' out/mine.txt)
           echo "the root hash veritysetup worked out: $mine"
           if [ -n "$mine" ] && [ "$mine" = "$published" ]; then
