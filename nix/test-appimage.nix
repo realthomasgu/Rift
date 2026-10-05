@@ -76,8 +76,11 @@ pkgs.runCommandCC "rift-test-appimage"
     mksquashfs root payload.squashfs -noappend -no-xattrs -all-root -quiet -no-progress
 
     # the runtime, with the appimage signature written over the abi version and two padding
-    # bytes of its elf header: 41 49 is AI and 02 is a type 2 appimage
-    $CC -static -O2 -o runtime ${runtime}
+    # bytes of its elf header: 41 49 is AI and 02 is a type 2 appimage. a real one is static
+    # because it has to run anywhere; this one is linked like anything else built here, since
+    # nothing ever runs it: the kernel takes the file by those bytes and appimage-run reads the
+    # rest of it rather than running the front
+    $CC -O2 -o runtime ${runtime}
     chmod +w runtime
     printf '\x41\x49\x02' | dd of=runtime bs=1 seek=8 conv=notrunc status=none
 
