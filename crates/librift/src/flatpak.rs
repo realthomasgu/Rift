@@ -60,8 +60,33 @@ pub fn installed() -> Result<Vec<String>, String> {
 /// # Errors
 ///
 /// What flatpak said when the install failed, as a sentence, or that it could not be run.
-pub fn install(remote: &str, id: &str, mut each: impl FnMut(&Progress)) -> Result<(), String> {
-    let mut child = flatpak(&["install", "--system", "--assumeyes", remote, id])
+pub fn install(remote: &str, id: &str, each: impl FnMut(&Progress)) -> Result<(), String> {
+    walk(&["install", "--system", "--assumeyes", remote, id], each)
+}
+
+/// Take an app out of the system installation, and whatever it was the only one to need. `each`
+/// hears how far it has got. Blocks until flatpak is done.
+///
+/// # Errors
+///
+/// What flatpak said when it could not, as a sentence, or that it could not be run.
+pub fn remove(id: &str, each: impl FnMut(&Progress)) -> Result<(), String> {
+    walk(
+        &[
+            "uninstall",
+            "--system",
+            "--assumeyes",
+            "--delete-data",
+            "--unused",
+            id,
+        ],
+        each,
+    )
+}
+
+/// Run flatpak over a transaction, reading how far it has got off its output as it goes.
+fn walk(args: &[&str], mut each: impl FnMut(&Progress)) -> Result<(), String> {
+    let mut child = flatpak(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -91,6 +116,71 @@ pub fn install(remote: &str, id: &str, mut each: impl FnMut(&Progress)) -> Resul
         Ok(())
     } else {
         Err(sentence(&said).unwrap_or_else(|| format!("flatpak stopped with {status}.")))
+    }
+}
+
+/// The apps the appstream data of the remotes names, for words typed into the field. flatpak reads
+/// the data it has and fetches what it has not, so the first search of a remote takes as long as
+/// the download.
+///
+/// # Errors
+///
+/// What flatpak said when it could not search, as a sentence: no network, or no remote at all.
+pub fn search(words: &str) -> Result<Vec<Found>, String> {
+    let words = words.trim();
+    if words.is_empty() {
+        return Ok(Vec::new());
+    }
+    // nothing matching is not a failure, and flatpak says so on its way out
+    match run(&[
+        "search",
+        "--columns=application,name,description,version,remotes",
+        words,
+    ]) {
+        Ok(printed) => Ok(ranked(parse_found(&printed), words)),
+        Err(why) if why.starts_with("No matches found") => Ok(Vec::new()),
+        Err(why) => Err(why),
+    }
+}
+
+/// What a remote says about one app before anything of it is installed.
+///
+/// # Errors
+///
+/// What flatpak said when the remote could not say, as a sentence.
+pub fn about(remote: &str, id: &str) -> Result<About, String> {
+    run(&["remote-info", "--system", remote, id]).map(|printed| parse_about(id, &printed))
+}
+
+/// The metadata of an app on a remote, which is where the permissions it asks for are written.
+///
+/// # Errors
+///
+/// What flatpak said when the remote could not say, as a sentence.
+pub fn metadata(remote: &str, id: &str) -> Result<String, String> {
+    run(&["remote-info", "--system", "--show-metadata", remote, id])
+}
+
+/// The apps installed, with the name and the room each one takes. Falls back to the ids alone on a
+/// flatpak that does not know one of the columns.
+///
+/// # Errors
+///
+/// What flatpak said when it failed, as a sentence, or that it could not be run.
+pub fn apps() -> Result<Vec<Listed>, String> {
+    let columns = run(&["list", "--app", "--columns=application,name,size,origin"]);
+    match columns {
+        Ok(printed) => Ok(parse_listed(&printed)),
+        Err(_) => installed().map(|ids| {
+            ids.into_iter()
+                .map(|id| Listed {
+                    name: tail(&id),
+                    id,
+                    size: String::new(),
+                    remote: String::new(),
+                })
+                .collect()
+        }),
     }
 }
 
@@ -169,6 +259,171 @@ pub fn parse_sizes(printed: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// One app the appstream data of a remote names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    /// The app's id on its remote.
+    pub id: String,
+    /// The name people know it by, out of the appstream data. The id's last part where there is
+    /// none.
+    pub name: String,
+    /// The one line the appstream data says about it, which may be nothing at all.
+    pub summary: String,
+    /// The version the remote has, where it says one.
+    pub version: String,
+    /// The remote it comes from.
+    pub remote: String,
+}
+
+/// What a remote says about one app before anything of it is installed: the heading `remote-info`
+/// prints and the facts under it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct About {
+    /// The app's id.
+    pub id: String,
+    /// Its name, out of the appstream data of the remote.
+    pub name: String,
+    /// The one line about it, which may be nothing at all.
+    pub summary: String,
+    /// The version the remote has.
+    pub version: String,
+    /// The licence of the app itself.
+    pub licence: String,
+    /// How much there is to download, as flatpak writes it.
+    pub download: String,
+    /// How much room it takes once it is installed, as flatpak writes it.
+    pub installed: String,
+    /// The runtime it runs on, which comes with it when nothing else needs it yet.
+    pub runtime: String,
+}
+
+/// One app that is installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    /// The app's id.
+    pub id: String,
+    /// The name it is listed under.
+    pub name: String,
+    /// The room it takes, as flatpak writes it.
+    pub size: String,
+    /// The remote it came from.
+    pub remote: String,
+}
+
+/// The rows `flatpak search` prints, one app a line with a tab between the columns, in the order
+/// the columns were asked for. A column flatpak has nothing for is empty.
+#[must_use]
+pub fn parse_found(printed: &str) -> Vec<Found> {
+    printed
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+            let [id, name, summary, version, remote] = fields.as_slice() else {
+                return None;
+            };
+            (!id.is_empty()).then(|| Found {
+                id: (*id).to_string(),
+                name: if name.is_empty() {
+                    tail(id)
+                } else {
+                    (*name).to_string()
+                },
+                summary: (*summary).to_string(),
+                version: (*version).to_string(),
+                remote: (*remote).to_string(),
+            })
+        })
+        .collect()
+}
+
+/// What was found, in the order to read it: the apps whose name begins with what was typed, then
+/// the ones whose name holds it, then the rest. A search for a player should not put the player's
+/// add-ons over the player.
+#[must_use]
+pub fn ranked(mut found: Vec<Found>, words: &str) -> Vec<Found> {
+    let words = words.trim().to_lowercase();
+    found.sort_by_key(|one| {
+        let name = one.name.to_lowercase();
+        if name == words {
+            0
+        } else if name.starts_with(&words) {
+            1
+        } else if name.contains(&words) {
+            2
+        } else {
+            3
+        }
+    });
+    found
+}
+
+/// What `remote-info` prints: a heading of the name and the one line about it, then a label and a
+/// value a line. A remote with no appstream data for the app prints no heading, and the name is
+/// then the last part of its id.
+#[must_use]
+pub fn parse_about(id: &str, printed: &str) -> About {
+    let mut about = About {
+        id: id.to_string(),
+        name: tail(id),
+        ..About::default()
+    };
+    for line in printed.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((label, value)) = line.split_once(':') else {
+            // the heading, which is the name and the line about it with a dash between them
+            if let Some((name, summary)) = line.split_once(" - ") {
+                about.name = name.trim().to_string();
+                about.summary = summary.trim().to_string();
+            } else {
+                about.name = line.to_string();
+            }
+            continue;
+        };
+        let value = value.trim().to_string();
+        match label.trim() {
+            "Version" => about.version = value,
+            "License" => about.licence = value,
+            "Download Size" => about.download = value,
+            "Installed Size" => about.installed = value,
+            "Runtime" => about.runtime = value,
+            _ => {}
+        }
+    }
+    about
+}
+
+/// The rows `flatpak list` prints for the apps that are installed.
+#[must_use]
+pub fn parse_listed(printed: &str) -> Vec<Listed> {
+    printed
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('\t').map(str::trim).collect();
+            let id = (*fields.first()?).to_string();
+            if id.is_empty() {
+                return None;
+            }
+            let field = |at: usize| fields.get(at).unwrap_or(&"").to_string();
+            let name = field(1);
+            Some(Listed {
+                name: if name.is_empty() { tail(&id) } else { name },
+                id,
+                size: field(2),
+                remote: field(3),
+            })
+        })
+        .collect()
+}
+
+/// The last part of an app id, which is the only name there is for an app whose remote says none.
+#[must_use]
+pub fn tail(id: &str) -> String {
+    id.rsplit('.').next().unwrap_or(id).to_string()
+}
+
 /// A size as flatpak writes it, `< 1.4 MB` or `999 bytes`, in bytes. It writes SI units, and in a
 /// UTF-8 locale a no-break space between the number and the unit.
 #[must_use]
@@ -227,7 +482,10 @@ impl Progress {
             return false;
         }
         let words = line.trim_start();
-        if !(words.starts_with("Installing") || words.starts_with("Updating")) {
+        if !(words.starts_with("Installing")
+            || words.starts_with("Updating")
+            || words.starts_with("Uninstalling"))
+        {
             return false;
         }
         let (step, steps) = counted(words).unwrap_or((1, 1));
@@ -423,6 +681,101 @@ Installation complete.
             vec!["flathub".to_string(), "rift-test".to_string()]
         );
         assert!(names("").is_empty());
+    }
+
+    #[test]
+    fn a_search_reads_back_with_the_apps_before_their_add_ons() {
+        // the five columns the search asks for, in that order, with a tab between them and nothing
+        // where the remote has nothing
+        let printed = "org.videolan.VLC.Plugin.bdj\tBluray Java menus (BDJ) plugin for VLC\t\
+             Provides Bluray Java menus (BDJ) support in VLC.\t\tflathub\n\
+             org.videolan.VLC\tVLC\tVLC media player, the open-source multimedia player\t3.0.23\t\
+             flathub\n\
+             dev.rift.TestEditor\t\t\t\trift-test\n\
+             broken line\n";
+        let found = ranked(parse_found(printed), "vlc");
+        assert_eq!(
+            found.iter().map(|one| one.id.as_str()).collect::<Vec<_>>(),
+            [
+                "org.videolan.VLC",
+                "org.videolan.VLC.Plugin.bdj",
+                "dev.rift.TestEditor"
+            ]
+        );
+        assert_eq!(found[0].name, "VLC");
+        assert_eq!(found[0].version, "3.0.23");
+        assert_eq!(found[0].remote, "flathub");
+        // an app whose remote says no name at all is known by the last part of its id
+        assert_eq!(found[2].name, "TestEditor");
+        assert!(found[2].summary.is_empty());
+        assert!(parse_found("").is_empty());
+    }
+
+    #[test]
+    fn what_a_remote_says_about_an_app_is_its_heading_and_its_sizes() {
+        let printed = "\nVLC - VLC media player, the open-source multimedia player\n\n\
+             \x20           ID: org.videolan.VLC\n\
+             \x20          Ref: app/org.videolan.VLC/x86_64/stable\n\
+             \x20      Version: 3.0.23\n\
+             \x20      License: GPL-2.0+\n\
+             Download Size: 52.7 MB\n\
+             Installed Size: 139.4\u{a0}MB\n\
+             \x20      Runtime: org.kde.Platform/x86_64/5.15-25.08\n\
+             \x20       Commit: 5e38b439\n";
+        let about = parse_about("org.videolan.VLC", printed);
+        assert_eq!(about.name, "VLC");
+        assert_eq!(
+            about.summary,
+            "VLC media player, the open-source multimedia player"
+        );
+        assert_eq!(about.version, "3.0.23");
+        assert_eq!(about.licence, "GPL-2.0+");
+        assert_eq!(bytes(&about.download), Some(52_700_000));
+        assert_eq!(bytes(&about.installed), Some(139_400_000));
+        assert_eq!(about.runtime, "org.kde.Platform/x86_64/5.15-25.08");
+        // a remote with no appstream data for the app prints no heading at all
+        let bare = parse_about(
+            "dev.rift.TestApp",
+            "            ID: dev.rift.TestApp\n Download Size: 566 bytes\nInstalled Size: 2.0 kB\n",
+        );
+        assert_eq!(bare.name, "TestApp");
+        assert!(bare.summary.is_empty() && bare.version.is_empty());
+        assert_eq!(bytes(&bare.installed), Some(2000));
+    }
+
+    #[test]
+    fn the_apps_installed_read_back_with_their_names_and_sizes() {
+        let listed = parse_listed(
+            "org.videolan.VLC\tVLC\t139.4 MB\tflathub\ndev.rift.TestApp\t\t2.0 kB\trift-test\n\n",
+        );
+        assert_eq!(
+            listed,
+            vec![
+                Listed {
+                    id: "org.videolan.VLC".to_string(),
+                    name: "VLC".to_string(),
+                    size: "139.4 MB".to_string(),
+                    remote: "flathub".to_string(),
+                },
+                Listed {
+                    id: "dev.rift.TestApp".to_string(),
+                    name: "TestApp".to_string(),
+                    size: "2.0 kB".to_string(),
+                    remote: "rift-test".to_string(),
+                },
+            ]
+        );
+        assert_eq!(tail("dev.rift.TestApp"), "TestApp");
+        assert_eq!(tail("nodots"), "nodots");
+    }
+
+    #[test]
+    fn a_remove_moves_the_same_way_an_install_does() {
+        let mut progress = Progress::default();
+        assert!(progress.line("Uninstalling 1/2\u{2026}"));
+        assert_eq!(progress.step(), (1, 2));
+        assert!(progress.line("Uninstalling 2/2\u{2026} \u{2588}\u{2588} 50%"));
+        assert_eq!(progress.percent(), 75);
     }
 
     #[test]
