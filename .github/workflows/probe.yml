@@ -14,9 +14,12 @@ jobs:
       - name: Can veritysetup work out the root hash systemd-repart published
         run: |
           set +e
-          # the image's own systemd, so this is the same repart that builds the store's verity tree
-          systemd=$(nix eval --raw '.#nixosConfigurations.rift.config.image.repart.package.outPath')
+          # the image's own systemd, so this is the same repart that builds the store's verity tree.
+          # nix build, not nix eval: eval gives the path without putting anything there
+          systemd=$(nix build --no-link --print-out-paths \
+            '.#nixosConfigurations.rift.config.image.repart.package')
           echo "systemd: $systemd"
+          ls "$systemd/bin" | grep -i repart
           repart=$systemd/bin/systemd-repart
           V=$(nix build --inputs-from . nixpkgs#cryptsetup.bin --no-link --print-out-paths)/bin/veritysetup
           echo "veritysetup: $V"
@@ -49,8 +52,10 @@ jobs:
           EOF
           echo "--- repart ---"
           sudo "$repart" --empty=create --size=auto --seed="$seed" \
-            --definitions=defs --json=pretty --dry-run=no out/test.raw
+            --definitions=defs --json=pretty --dry-run=no out/test.raw | tee out/repart.json
           echo "repart: $?"
+          published=$(jq -r '.[] | select(.label | startswith("store_")) | .roothash' out/repart.json)
+          echo "the root hash repart published: $published"
           sudo chown "$(id -u)" out/test.raw
           echo "--- the partitions it made ---"
           sfdisk -J out/test.raw | jq -r '.partitiontable.partitions[] | "\(.name) start \(.start) size \(.size)"'
@@ -75,8 +80,16 @@ jobs:
           echo "salt $salt"
           echo "--- veritysetup format over the same data, with those parameters ---"
           "$V" format --data-block-size="$db" --hash-block-size="$hb" \
-            --data-blocks="$blocks" --salt="$salt" --uuid="$uid" out/store.bin out/mine.bin
+            --data-blocks="$blocks" --salt="$salt" --uuid="$uid" out/store.bin out/mine.bin \
+            | tee out/mine.txt
           echo "format: $?"
+          mine=$(awk '/Root hash:/ { print $3 }' out/mine.txt)
+          echo "the root hash veritysetup worked out: $mine"
+          if [ -n "$mine" ] && [ "$mine" = "$published" ]; then
+            echo "SAME ROOT HASH"
+          else
+            echo "DIFFERENT ROOT HASH"
+          fi
           echo "--- the two trees ---"
           ls -l out/tree.bin out/mine.bin
           cmp out/tree.bin out/mine.bin && echo "SAME BYTES" || echo "different bytes"
