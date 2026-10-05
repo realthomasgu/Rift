@@ -1856,6 +1856,55 @@ def main():
                 fail(f"Welcome is still running after {what}")
             time.sleep(2)
 
+    def store_said(what):
+        """What rift-store --state prints, a line each, or None while no Store answers."""
+        status, output = run("rift-store --state", what)
+        if status != 0:
+            return None
+        return [printed.strip() for printed in without_console(output).splitlines() if printed.strip()]
+
+    def store_until(seconds, ready, what):
+        """Ask rift-store --state until ready(lines) is true, and answer those lines."""
+        until = time.monotonic() + seconds
+        while True:
+            lines = store_said(what)
+            if lines is not None and ready(lines):
+                return lines
+            if time.monotonic() > until:
+                _, output = run("journalctl -b -t store -o cat --no-pager | tail -n 20", "the Store's log")
+                fail(f"the Store did not come to {what} in {seconds} s, its state is {lines!r}"[:2000]
+                     + f". It logged: {without_console(output).strip()[-1000:]!r}")
+            time.sleep(2)
+
+    def store_job(lines, app_id):
+        """How the last install or remove of an app is going, out of the state."""
+        doing = None
+        for printed in lines or []:
+            word, _, rest = printed.partition(" ")
+            if word == "job" and rest.startswith(app_id + " "):
+                doing = rest[len(app_id) + 1:].strip()
+        return doing
+
+    def store_value(lines, key):
+        """The rest of the first line of the Store's state that starts with this word."""
+        return welcome_value(lines, key)
+
+    def store_picture(png, name):
+        """A screendump of the Store as it stands, saved as png."""
+        try:
+            width, height, rgb = screendump(args.qmp, work, name)
+        except (OSError, RuntimeError) as e:
+            fail(f"screendump: {e}")
+        write_png(png, width, height, rgb)
+
+    def store_gone(what):
+        """Wait for the Store to end: its socket stops answering."""
+        until = time.monotonic() + 60
+        while store_said(f"whether the Store is still there after {what}") is not None:
+            if time.monotonic() > until:
+                fail(f"the Store is still running after {what}")
+            time.sleep(2)
+
     def welcome_offline(what, png):
         """Welcome on the page that says there is no network, as the session opened it."""
         lines = welcome_until(300, lambda lines: welcome_value(lines, "page") == "offline",
@@ -9231,6 +9280,126 @@ def main():
         # nothing is installing, so the close button ends it
         run("rift-welcome --set close now", "Welcome's close button")
         welcome_gone("the close button")
+        # 6f. the Store. the test's repository is a remote of the system installation already, and
+        # its second app carries appstream data of its own: a name, a line about it, and a handful of
+        # things it asks for. the Store lists the suggested apps on its front page with the room each
+        # takes on Flathub, finds that app by a word of its name, says on the app's own page what it
+        # asks for before anything is downloaded, installs it through flatpak's system helper, which
+        # polkit allows the owner, lists it among the apps that are installed, and takes it off again
+        editor_id = "dev.rift.TestEditor"
+        editor_name = "Rift test editor"
+        editor_about = "A plain text editor for the boot test"
+        run("systemd-run --user --quiet --collect --unit=rift-store rift-store",
+            "the Store from the Applications menu")
+        store_now = store_until(
+            300, lambda lines: store_value(lines, "page") == "apps"
+            and (store_value(lines, "remotes") or "").startswith("flathub"),
+            "the front page with the remotes the drive has")
+        store_remotes = store_value(store_now, "remotes")
+        if "rift-test" not in (store_remotes or ""):
+            fail(f"the Store says its remotes are {store_remotes!r}, without the test's own")
+        store_apps = [printed for printed in store_now if printed.startswith("app ")]
+        store_vlc = next((printed for printed in store_apps if printed.startswith("app org.videolan.VLC ")), None)
+        if len(store_apps) < 20 or store_vlc is None:
+            fail(f"the Store's front page lists {len(store_apps)} of the suggested apps: {store_apps}")
+        store_picture(f"{flatpak_stem}-store-apps{flatpak_extension}", "store-apps")
+        ok(f"the Store listed {len(store_apps)} suggested apps from {store_remotes}, {store_vlc!r} among them")
+
+        # the field. the words are looked for in the appstream data of every remote, which flatpak
+        # fetches the first time it is asked, so this is the one step that waits on Flathub
+        run("rift-store --set search editor", "editor typed into the Store's field")
+        store_now = store_until(
+            600, lambda lines: store_value(lines, "searching") == "no"
+            and store_value(lines, "words") == "editor"
+            and ((store_value(lines, "rows") or "").isdigit() or store_value(lines, "rows-problem")),
+            "what the search for editor found")
+        store_rows = [printed for printed in store_now if printed.startswith("row ")]
+        if f"row {editor_id} {editor_name}" not in store_rows:
+            fail(f"the Store's search for editor did not find {editor_id} under its own name. It found "
+                 f"{len(store_rows)} rows: {store_rows[:12]}. {store_value(store_now, 'rows-problem') or ''}")
+        store_picture(f"{flatpak_stem}-store-found{flatpak_extension}", "store-found")
+        ok(f"the Store's search for editor found {len(store_rows)} apps on the remotes, {editor_name!r} among them")
+
+        # the app's own page, before anything of it is installed
+        run(f"rift-store --set open {editor_id}", f"the page of {editor_id}")
+        store_now = store_until(
+            120, lambda lines: store_value(lines, "shown") == editor_id
+            and ((store_value(lines, "permissions") or "").isdigit()
+                 or store_value(lines, "permissions-problem")),
+            "the app's page with what it asks for")
+        store_asks = [printed[len("permission "):] for printed in store_now if printed.startswith("permission ")]
+        store_wanted = [
+            "Reads and writes your home folder",
+            "Reads your Downloads folder",
+            "Uses the graphics card",
+            "Opens a window of its own",
+            "Plays sound, and can listen to the microphone",
+            "Reaches the network",
+            "Talks to the programs of the desktop directly",
+            "Sends notifications",
+        ]
+        if store_asks != store_wanted:
+            fail(f"the Store's page for {editor_id} says it asks for {store_asks}, not {store_wanted}. "
+                 f"{store_value(store_now, 'permissions-problem') or ''}")
+        for key, wanted in (("name", editor_name), ("summary", editor_about), ("installed", "no")):
+            if store_value(store_now, key) != wanted:
+                fail(f"the Store's page for {editor_id} says {key} {store_value(store_now, key)!r}, not {wanted!r}")
+        store_size = store_value(store_now, "size")
+        store_picture(f"{flatpak_stem}-store-app{flatpak_extension}", "store-app")
+        ok(f"the Store's page for {editor_name} says {store_size}, {store_value(store_now, 'download')} to download, "
+           f"and the {len(store_asks)} things it asks for with {store_asks[0]!r} first")
+
+        # Install, which is flatpak's system helper doing the work
+        run("rift-store --set install now", "Install on the app's page")
+        store_seen = []
+        store_deadline = time.monotonic() + 600
+        while True:
+            store_now = store_said("how the install is going")
+            store_doing = store_job(store_now, editor_id)
+            if store_doing and store_doing not in store_seen:
+                store_seen.append(store_doing)
+                if store_doing.startswith("running") \
+                        and not any(seen.startswith("running") for seen in store_seen[:-1]):
+                    store_picture(f"{flatpak_stem}-store-installing{flatpak_extension}", "store-installing")
+            if store_doing == "done" or (store_doing or "").startswith("failed"):
+                break
+            if time.monotonic() > store_deadline:
+                fail(f"the Store's install of {editor_id} did not finish in 600 s: {store_seen}")
+            time.sleep(1)
+        if store_doing != "done":
+            _, output = run("journalctl -b -u flatpak-system-helper -o cat --no-pager | tail -n 30",
+                            "the system helper's log")
+            fail(f"the Store could not install {editor_id}: {store_doing}. The system helper said: "
+                 f"{without_console(output).strip()[-1200:]!r}")
+        _, printed = sandboxed("flatpak list --system --columns=application,branch | cat",
+                               "the system installation's flatpaks after the Store's install")
+        if not re.search(rf"^{re.escape(editor_id)}\s+test\s*$", printed, re.M):
+            fail(f"flatpak list does not show {editor_id} on its test branch after the Store installed it")
+        store_until(60, lambda lines: store_value(lines, "installed") == "yes",
+                    "the app's page saying it is installed")
+        run("rift-store --page installed", "the Store's list of what is installed")
+        store_now = store_until(
+            120, lambda lines: store_value(lines, "page") == "installed"
+            and f"install {editor_id} {editor_name}" in lines,
+            "the app among the apps that are installed")
+        store_picture(f"{flatpak_stem}-store-installed{flatpak_extension}", "store-installed")
+        ok(f"the Store installed {editor_id} ({', '.join(store_seen)}), flatpak list has it, and it is on "
+           f"the list of {store_value(store_now, 'installs')} apps that are installed")
+
+        # and Remove takes it off again, which polkit allows the owner too
+        run(f"rift-store --set open {editor_id}", f"the page of {editor_id} again")
+        store_until(60, lambda lines: store_value(lines, "shown") == editor_id, "the app's page again")
+        run("rift-store --set remove now", "Remove on the app's page")
+        store_now = store_until(600, lambda lines: store_value(lines, "installed") == "no",
+                                "the app's page saying it is gone")
+        _, printed = sandboxed("flatpak list --system --columns=application,branch | cat",
+                               "the system installation's flatpaks after the Store's remove")
+        if re.search(rf"^{re.escape(editor_id)}\s+test\s*$", printed, re.M):
+            fail(f"flatpak list still shows {editor_id} after the Store took it off")
+        run("rift-store --set close now", "the Store's close button")
+        store_gone("the close button")
+        ok(f"the Store took {editor_id} off again ({store_job(store_now, editor_id)}) and closed")
+
         flatpak_repo.shutdown()
 
         # and an installed flatpak is in the applications menu: it exports a desktop entry into the

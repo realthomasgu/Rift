@@ -1,13 +1,19 @@
-# a flatpak runtime and app of our own for the boot test, in a repository the test serves and adds as
-# a remote, so welcome installs the app the way it installs one from flathub and the test needs
-# nothing from flathub. the runtime is a static busybox and a static gdbus, the app one shell script
+# a flatpak runtime and two apps of our own for the boot test, in a repository the test serves and
+# adds as a remote, so welcome and the store install them the way they install one from flathub and
+# the test needs nothing from flathub. the runtime is a static busybox and a static gdbus, each app
+# one shell script. the second app carries appstream data of its own, which is what a store searches
+# and reads a name and a line about an app out of, and asks for a few things, which is what its page
+# shows before it is installed
 { pkgs }:
 let
   inherit (pkgs) lib;
   runtime = "dev.rift.TestPlatform";
   app = "dev.rift.TestApp";
-  # the name the applications menu lists the installed app under
+  editor = "dev.rift.TestEditor";
+  # the names the applications menu lists the installed apps under
   appName = "Rift test app";
+  editorName = "Rift test editor";
+  editorAbout = "A plain text editor for the boot test";
   branch = "test";
   # what the app does: reads the file the document portal gave it, then the same file where it is in
   # home, asks the desktop portal whether there is a network, and asks the user manager for
@@ -85,7 +91,57 @@ pkgs.runCommand "rift-test-flatpak"
     shared=network;
     EOF
     flatpak build-export $sign --disable-fsync repo testapp ${branch}
-    # the summary a client reads first, signed as well
+
+    # the second app. build-export reads appstream out of files/share/app-info and nowhere else, so
+    # the components file is written here the way appstream-compose would write it; without it a
+    # client knows the app by the last part of its id and nothing more
+    mkdir -p editor/files/bin editor/files/share/app-info/xmls editor/export/share/applications
+    printf '#!/bin/sh\necho ${editor}\n' > editor/files/bin/edit
+    chmod 755 editor/files/bin/edit
+    cat > components.xml <<EOF
+    <?xml version="1.0" encoding="UTF-8"?>
+    <components version="0.8">
+      <component type="desktop-application">
+        <id>${editor}.desktop</id>
+        <name>${editorName}</name>
+        <summary>${editorAbout}</summary>
+        <description><p>The app the boot test installs from the Store. It has a name and a line about it of its own, so a search has something to find.</p></description>
+        <project_license>GPL-3.0-or-later</project_license>
+        <metadata_license>CC0-1.0</metadata_license>
+        <categories><category>Utility</category><category>TextEditor</category></categories>
+      </component>
+    </components>
+    EOF
+    gzip -n -c components.xml > editor/files/share/app-info/xmls/${editor}.xml.gz
+    cat > editor/export/share/applications/${editor}.desktop <<EOF
+    [Desktop Entry]
+    Type=Application
+    Name=${editorName}
+    Exec=edit
+    Icon=${editor}
+    Categories=Utility;TextEditor;
+    EOF
+    # a few things to ask for, one of them wide: the store's page says each of them in its own
+    # sentence, the wide one first
+    cat > editor/metadata <<EOF
+    [Application]
+    name=${editor}
+    runtime=${runtime}/x86_64/${branch}
+    sdk=${runtime}/x86_64/${branch}
+    command=edit
+
+    [Context]
+    shared=network;ipc;
+    sockets=wayland;pulseaudio;
+    devices=dri;
+    filesystems=home;xdg-download:ro;
+
+    [Session Bus Policy]
+    org.freedesktop.Notifications=talk
+    EOF
+    flatpak build-export $sign --disable-fsync repo editor ${branch}
+
+    # the summary a client reads first, and the appstream branch a store searches, both signed
     flatpak build-update-repo $sign repo
 
     mkdir -p $out
