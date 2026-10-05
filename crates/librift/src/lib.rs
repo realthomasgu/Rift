@@ -8,7 +8,8 @@
 //! programs the shell's keys start is
 //! running, the index for search by meaning, what the system calls itself, dark or light and the
 //! wallpaper, the mouse and the touchpad, the sound `PipeWire` plays and hears, how the boot looks,
-//! the owner's account, the apps Flatpak installs and the ones Rift suggests, what is in a folder
+//! the owner's account, the apps Flatpak installs and the ones Rift suggests, what one of them
+//! asks for before it is installed, what is in a folder
 //! and what kind of file each thing is, the trash, and how a drive is written.
 //!
 //! Apache-2.0 so other people can embed it. Keep it dependency free: only the `bus` feature,
@@ -56,6 +57,8 @@ pub mod os;
 // the owner's account is a unix one, and so are its password files
 #[cfg(unix)]
 pub mod owner;
+// what a flatpak app asks for is read out of its metadata, which is plain text wherever it is read
+pub mod permissions;
 pub mod pointer;
 #[cfg(unix)]
 pub mod printers;
