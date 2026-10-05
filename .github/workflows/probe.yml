@@ -1,0 +1,105 @@
+name: net probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: Does an override take the network from a flatpak app
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: The image's own flatpak and the test repository
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          nix build --inputs-from . nixpkgs#flatpak -o fp -L
+          nix build .#test-flatpak -o tf -L
+          ./fp/bin/flatpak --version
+      - name: An override that unshares the network
+        run: |
+          set -x
+          export PATH=$PWD/fp/bin:$PATH
+          export HOME=$RUNNER_TEMP/home
+          mkdir -p "$HOME"
+          id="dev.rift.TestApp"
+          mkdir -p served
+          echo "Reached the test server 2718" > served/net.txt
+          python3 -m http.server 8731 --bind 127.0.0.1 --directory served &
+          sleep 2
+          curl -sf http://127.0.0.1:8731/net.txt
+
+          fetch="--command=/usr/bin/wget $id -q -O- -T 4 http://127.0.0.1:8731/net.txt"
+
+          export FLATPAK_USER_DIR=$RUNNER_TEMP/fuser
+          export FLATPAK_SYSTEM_DIR=$RUNNER_TEMP/fsys
+          mkdir -p "$FLATPAK_USER_DIR" "$FLATPAK_SYSTEM_DIR"
+          flatpak remote-add --user --no-gpg-verify rift-test "file://$PWD/tf/repo"
+          flatpak install --user --noninteractive rift-test $id
+          flatpak list --user --columns=application,branch,installation
+
+          echo "== 1 a user install with no override reaches the server"
+          flatpak run $fetch; echo "exit=$?"
+
+          echo "== 2 the override of the installation the app is in"
+          mkdir -p "$FLATPAK_USER_DIR/overrides"
+          printf '[Context]\nshared=!network;\n' > "$FLATPAK_USER_DIR/overrides/$id"
+          flatpak override --user --show $id; echo "show=$?"
+          flatpak run $fetch; echo "exit=$?"
+          rm "$FLATPAK_USER_DIR/overrides/$id"
+
+          echo "== 3 the global override of that installation"
+          printf '[Context]\nshared=!network;\n' > "$FLATPAK_USER_DIR/overrides/global"
+          flatpak run $fetch; echo "exit=$?"
+          rm "$FLATPAK_USER_DIR/overrides/global"
+
+          echo "== 4 a system override while the app is installed per user only"
+          mkdir -p "$FLATPAK_SYSTEM_DIR/overrides"
+          printf '[Context]\nshared=!network;\n' > "$FLATPAK_SYSTEM_DIR/overrides/$id"
+          flatpak run $fetch; echo "exit=$?"
+
+          echo "== 5 what flatpak itself writes for --unshare=network"
+          rm "$FLATPAK_SYSTEM_DIR/overrides/$id"
+          flatpak override --user --unshare=network $id
+          od -c "$FLATPAK_USER_DIR/overrides/$id"
+          flatpak override --user --reset $id
+          ls -la "$FLATPAK_USER_DIR/overrides" || true
+
+          echo "== 6 an override for an app that is not installed anywhere"
+          printf '[Context]\nshared=!network;\n' > "$FLATPAK_USER_DIR/overrides/dev.rift.NoSuchApp"
+          flatpak override --user --show dev.rift.NoSuchApp; echo "show=$?"
+          flatpak run --command=/bin/true dev.rift.NoSuchApp; echo "exit=$?"
+          rm "$FLATPAK_USER_DIR/overrides/dev.rift.NoSuchApp"
+
+          flatpak uninstall --user --noninteractive --assumeyes $id
+
+          echo "== 7 the same in a system installation, which root does without the helper"
+          sudo env PATH="$PATH" HOME="$RUNNER_TEMP/roothome" \
+            FLATPAK_SYSTEM_DIR="$FLATPAK_SYSTEM_DIR" FLATPAK_USER_DIR="$RUNNER_TEMP/rootuser" \
+            sh -ex -c '
+              mkdir -p "$HOME" "$FLATPAK_USER_DIR"
+              id=dev.rift.TestApp
+              flatpak remote-add --system --no-gpg-verify rift-test "file://'"$PWD"'/tf/repo"
+              flatpak install --system --noninteractive rift-test $id
+              flatpak list --system --columns=application,branch,installation
+              fetch="--command=/usr/bin/wget $id -q -O- -T 4 http://127.0.0.1:8731/net.txt"
+              echo "== 7a the system install with no override"
+              flatpak run $fetch; echo "exit=$?"
+              echo "== 7b the system override of its own installation"
+              mkdir -p "$FLATPAK_SYSTEM_DIR/overrides"
+              printf "[Context]\nshared=!network;\n" > "$FLATPAK_SYSTEM_DIR/overrides/$id"
+              flatpak override --system --show $id; echo "show=$?"
+              flatpak run $fetch; echo "exit=$?"
+              echo "== 7c the app ids the system installation has"
+              ls "$FLATPAK_SYSTEM_DIR/app"
+              echo "== 7d does uninstall take the override away"
+              flatpak uninstall --system --noninteractive --assumeyes $id
+              ls -la "$FLATPAK_SYSTEM_DIR/overrides"
+              echo "== 7e and the network is back once the override is gone"
+              flatpak install --system --noninteractive rift-test $id
+              flatpak run $fetch; echo "exit=$?"
+              rm -f "$FLATPAK_SYSTEM_DIR/overrides/$id"
+              flatpak run $fetch; echo "exit=$?"
+            '
+          echo "== the probe finished"
