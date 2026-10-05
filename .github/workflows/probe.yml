@@ -20,6 +20,7 @@ jobs:
       - name: An override that unshares the network
         run: |
           set -x
+          set +e
           export PATH=$PWD/fp/bin:$PATH
           export HOME=$RUNNER_TEMP/home
           mkdir -p "$HOME"
@@ -77,7 +78,7 @@ jobs:
           echo "== 7 the same in a system installation, which root does without the helper"
           sudo env PATH="$PATH" HOME="$RUNNER_TEMP/roothome" \
             FLATPAK_SYSTEM_DIR="$FLATPAK_SYSTEM_DIR" FLATPAK_USER_DIR="$RUNNER_TEMP/rootuser" \
-            sh -ex -c '
+            sh -x -c '
               mkdir -p "$HOME" "$FLATPAK_USER_DIR"
               id=dev.rift.TestApp
               flatpak remote-add --system --no-gpg-verify rift-test "file://'"$PWD"'/tf/repo"
