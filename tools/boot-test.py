@@ -1873,7 +1873,9 @@ def main():
             if time.monotonic() > until:
                 _, output = run("journalctl -b --user-unit=rift-store.service -o cat --no-pager | tail -n 20",
                                 "the Store's log")
-                fail(f"the Store did not come to {what} in {seconds} s, its state is {lines!r}"[:2000]
+                # the front page's rows are twenty lines of the same thing and crowd out the rest
+                kept = [printed for printed in lines or [] if not printed.startswith("app ")]
+                fail(f"the Store did not come to {what} in {seconds} s, its state is {kept!r}"[:2000]
                      + f". It logged: {without_console(output).strip()[-1000:]!r}")
             time.sleep(2)
 

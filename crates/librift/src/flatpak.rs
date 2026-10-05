@@ -64,24 +64,17 @@ pub fn install(remote: &str, id: &str, each: impl FnMut(&Progress)) -> Result<()
     walk(&["install", "--system", "--assumeyes", remote, id], each)
 }
 
-/// Take an app out of the system installation, and whatever it was the only one to need. `each`
-/// hears how far it has got. Blocks until flatpak is done.
+/// Take an app out of the system installation. What it wrote in home stays, and so does the runtime
+/// it ran on. `each` hears how far it has got. Blocks until flatpak is done.
 ///
 /// # Errors
 ///
 /// What flatpak said when it could not, as a sentence, or that it could not be run.
 pub fn remove(id: &str, each: impl FnMut(&Progress)) -> Result<(), String> {
-    walk(
-        &[
-            "uninstall",
-            "--system",
-            "--assumeyes",
-            "--delete-data",
-            "--unused",
-            id,
-        ],
-        each,
-    )
+    // the app and nothing else. `--unused` is refused with a ref named ("Must not specify REFs when
+    // using --unused"), and `--delete-data` would throw away what the app wrote in home, which a
+    // button that says Remove must not do
+    walk(&["uninstall", "--system", "--assumeyes", id], each)
 }
 
 /// Run flatpak over a transaction, reading how far it has got off its output as it goes.
