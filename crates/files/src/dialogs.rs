@@ -1,6 +1,6 @@
 //! The dialogs: a name for a new folder, a new name for a file, the question before a name is
-//! replaced, the question before anything is deleted for good, what is known about what is
-//! selected, and the passphrase of a locked disk. Each stands in the middle of its window with the
+//! replaced, the question before anything is deleted for good, the question before an application
+//! in one file is run, what is known about what is selected, and the passphrase of a locked disk. Each stands in the middle of its window with the
 //! rest of the window dimmed behind it, the way GNOME's dialogs do: a title, one sentence or a
 //! field, and the answers along the bottom.
 
@@ -69,6 +69,13 @@ pub enum Dialog {
         /// Whether udisks is being asked at the moment.
         working: bool,
     },
+    /// An `AppImage`, which is an application in one file, before it is run. Nothing of the system
+    /// has checked it and it runs with everything the owner can reach, so it is asked for once,
+    /// the way a downloaded program is asked for on Windows and macOS.
+    Run {
+        /// The file itself.
+        path: PathBuf,
+    },
     /// A copy, a move or a file brought back from a moment whose name is already taken in the
     /// folder it is going to.
     Replace {
@@ -110,6 +117,7 @@ impl Dialog {
             Self::Forget { .. } => "forget",
             Self::Empty => "empty",
             Self::Properties(_) => "properties",
+            Self::Run { .. } => "run",
             Self::Unlock { .. } => "unlock",
             Self::Replace { .. } => "replace",
         }
@@ -241,32 +249,8 @@ pub fn view<'a>(
                 vec![cancel, primary(look, button, ready)],
             )
         }
-        Dialog::Delete { paths, trashless } => {
-            let names: Vec<String> = paths
-                .iter()
-                .map(|path| {
-                    path.file_name().map_or_else(
-                        || path.display().to_string(),
-                        |name| name.to_string_lossy().into_owned(),
-                    )
-                })
-                .collect();
-            let said = match (names.len() == 1, trashless) {
-                (true, false) => "It is not moved to the trash and cannot be brought back.",
-                (false, false) => "They are not moved to the trash and cannot be brought back.",
-                (true, true) => "It is on a disk with no trash, so it cannot be brought back.",
-                (false, true) => {
-                    "They are on a disk with no trash, so they cannot be brought back."
-                }
-            };
-            question(
-                look,
-                &names,
-                said,
-                cancel,
-                destructive(look, "Delete", ready),
-            )
-        }
+        Dialog::Delete { paths, trashless } => deleting(look, paths, *trashless, cancel, ready),
+        Dialog::Run { path } => running(look, path, cancel, ready),
         Dialog::Properties(facts) => properties(look, id, facts),
         Dialog::Unlock {
             name,
@@ -424,6 +408,61 @@ fn question<'a>(
         title,
         vec![sentence(look, said)],
         vec![cancel, delete],
+    )
+}
+
+/// The question before files are deleted for good: their names, and that they do not come back.
+fn deleting<'a>(
+    look: Colors,
+    paths: &[PathBuf],
+    trashless: bool,
+    cancel: Element<'a, Message>,
+    ready: Option<Message>,
+) -> Element<'a, Message> {
+    let names: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    let said = match (names.len() == 1, trashless) {
+        (true, false) => "It is not moved to the trash and cannot be brought back.",
+        (false, false) => "They are not moved to the trash and cannot be brought back.",
+        (true, true) => "It is on a disk with no trash, so it cannot be brought back.",
+        (false, true) => "They are on a disk with no trash, so they cannot be brought back.",
+    };
+    question(
+        look,
+        &names,
+        said,
+        cancel,
+        destructive(look, "Delete", ready),
+    )
+}
+
+/// The question before an application in one file is run: what it is, and what running it allows.
+fn running<'a>(
+    look: Colors,
+    path: &Path,
+    cancel: Element<'a, Message>,
+    ready: Option<Message>,
+) -> Element<'a, Message> {
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    dialog(
+        look,
+        format!("Run {name}?"),
+        vec![sentence(
+            look,
+            "This is an application in one file. It did not come from the Store, nothing has \
+             checked it, and it can read and change everything you can.",
+        )],
+        vec![cancel, primary(look, "Run", ready)],
     )
 }
 

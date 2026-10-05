@@ -10,6 +10,7 @@ use std::time::Duration;
 use iced::futures::channel::oneshot;
 use iced::widget::operation::{self, AbsoluteOffset};
 use iced::{Point, Task, window};
+use librift::appimage;
 use librift::apps::{self, App};
 use librift::defaults::Found;
 use librift::drives::{self, Exchange};
@@ -346,7 +347,8 @@ fn rearrange(state: &mut Files) -> Task<Message> {
 }
 
 /// Open the selection: one folder by going into it, several in windows of their own, and files
-/// with the apps that open them, each app once with all of its files. A file no app opens says so.
+/// with the apps that open them, each app once with all of its files. A file no app opens says so,
+/// and one application in one file is asked for first.
 fn open(state: &mut Files, id: window::Id, with: Option<&str>) -> Task<Message> {
     let Some(browser) = state.windows.get(&id) else {
         return Task::none();
@@ -380,6 +382,17 @@ fn open(state: &mut Files, id: window::Id, with: Option<&str>) -> Task<Message> 
     }
     if files.is_empty() {
         return Task::batch(tasks);
+    }
+    // an application in one file is no kind an app opens: the question is whether to run it, and
+    // the file's own first bytes are what says it is one, not its name
+    if let (None, [(name, Kind::File, _)]) = (with, files.as_slice()) {
+        let path = place.join(name);
+        if appimage::of(&path).is_some() {
+            if let Some(browser) = state.windows.get_mut(&id) {
+                browser.dialog = Some(Dialog::Run { path });
+            }
+            return Task::batch(tasks);
+        }
     }
     let all = apps::load();
     let found = Found::read();
@@ -418,6 +431,27 @@ fn open(state: &mut Files, id: window::Id, with: Option<&str>) -> Task<Message> 
         tasks.push(toast(state, id, problem, None));
     }
     Task::batch(tasks)
+}
+
+/// Run an application in one file, once the question has been answered: `appimage-run` lays out
+/// the ordinary Linux folders the program inside it asks for, over the store and read only, and
+/// runs it in them. It goes into a scope of its own named after the file, the way every app the
+/// session starts does, and it starts in the folder it lies in. The file needs no permission of
+/// its own, since appimage-run reads it rather than runs it.
+fn run_file(state: &mut Files, id: window::Id, path: &Path) -> Task<Message> {
+    let name = path
+        .file_name()
+        .unwrap_or(OsStr::new("AppImage"))
+        .to_string_lossy()
+        .into_owned();
+    let words = vec![
+        appimage::RUN.to_string(),
+        path.to_string_lossy().into_owned(),
+    ];
+    match apps::start(&name, &name, &words, path.parent()) {
+        Ok(()) => Task::none(),
+        Err(why) => toast(state, id, format!("{why}."), None),
+    }
 }
 
 /// Each selected folder in a window of its own.
@@ -1038,6 +1072,7 @@ pub fn confirm(state: &mut Files, id: window::Id) -> Task<Message> {
                 .collect();
             ui::start_job(state, Some(id), Work::Empty(roots))
         }
+        Dialog::Run { path } => run_file(state, id, &path),
         Dialog::Properties(_) | Dialog::Unlock { .. } => Task::none(),
         // its default button keeps both, which is what the job does when nothing is replaced
         Dialog::Replace {
