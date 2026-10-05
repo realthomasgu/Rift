@@ -1,13 +1,14 @@
 //! The Privacy and security page: what each app was told about the camera, whether apps remember
-//! the files opened lately, the firewall and the network switch of each app in a sandbox, what
-//! fwupd says about the firmware, and a sentence each for what there is nothing to set for: the
-//! microphone, location, the screen lock and what is sent about the machine.
+//! the files opened lately, the firewall and the network switch of each app that runs in a
+//! sandbox, Flatpak apps among them, what fwupd says about the firmware, and a sentence each for
+//! what there is nothing to set for: the microphone, location, the screen lock and what is sent
+//! about the machine.
 //!
-//! The camera's answers are the portal's, kept in the permission store, and the sandboxes are
-//! Airlock's, so the page reads all but fwupd as it comes up and every two seconds while it is up:
-//! an app asking for the camera, or rift net off in a terminal, shows here too. fwupd is asked once
-//! as the page comes up, since the firmware does not change while the machine runs, and it may take
-//! a few seconds to start.
+//! The camera's answers are the portal's, kept in the permission store, and the apps on the
+//! network switch are Airlock's, so the page reads all but fwupd as it comes up and every two
+//! seconds while it is up: an app asking for the camera, or rift net off in a terminal, shows here
+//! too. fwupd is asked once as the page comes up, since the firmware does not change while the
+//! machine runs, and it may take a few seconds to start.
 
 use std::thread;
 use std::time::Duration;
@@ -43,7 +44,8 @@ pub struct Picture {
     pub recent: bool,
     /// Whether the firewall's rules are loaded.
     pub firewall: Result<bool, String>,
-    /// The apps whose network is off or that run in a sandbox now.
+    /// The apps on the network switch: every Flatpak app that is installed, every app whose
+    /// network is off, and every app that runs in a sandbox now.
     pub sandboxes: Result<Vec<airlock::App>, String>,
 }
 
@@ -109,7 +111,7 @@ pub enum Asked {
     Camera(String, bool),
     /// Remember the files opened lately, or not.
     Recent(bool),
-    /// Give this app in a sandbox the network, or take it away.
+    /// Give this app on the network switch the network, or take it away.
     Network(String, bool),
 }
 
@@ -171,8 +173,8 @@ pub fn named(state: &Settings, name: &str, value: &str) -> Option<Asked> {
 
 /// The lines `rift-settings --state` prints, once the page has read: how many apps have an answer
 /// about the camera and a line each, whether recent files are remembered, whether the firewall's
-/// rules are loaded, how many apps Airlock lists and a line each with its network, and what fwupd
-/// says. `none` is a service that did not answer.
+/// rules are loaded, how many apps Airlock lists and a line each with its network and its kind,
+/// and what fwupd says. `none` is a service that did not answer.
 #[must_use]
 pub fn state(state: &Settings) -> Vec<String> {
     let mut lines = Vec::new();
@@ -201,7 +203,12 @@ pub fn state(state: &Settings) -> Vec<String> {
             Ok(apps) => {
                 lines.push(format!("sandboxed {}", apps.len()));
                 for app in apps {
-                    lines.push(format!("app-network {} {}", word(app.network), app.name));
+                    let kind = if app.flatpak { "flatpak" } else { "command" };
+                    lines.push(format!(
+                        "app-network {} {kind} {}",
+                        word(app.network),
+                        app.name
+                    ));
                 }
             }
             Err(_) => lines.push("sandboxed none".to_string()),
@@ -242,7 +249,7 @@ pub fn view(state: &Settings, look: Colors) -> Element<'_, Message> {
         part(look, "Location", LOCATION),
         part(look, "Screen lock", LOCKING),
         history,
-        the_network(look, now),
+        the_network(state, look, now),
         the_firmware(state, look),
         part(look, "Diagnostics", DIAGNOSTICS),
     ]
@@ -328,8 +335,8 @@ fn camera_row<'a>(state: &'a Settings, look: Colors, answer: &'a Answer) -> Elem
     .into()
 }
 
-/// The firewall, and a switch for the network of each app in a sandbox.
-fn the_network(look: Colors, now: &Picture) -> Element<'_, Message> {
+/// The firewall, and a switch for the network of each app on it.
+fn the_network<'a>(state: &'a Settings, look: Colors, now: &'a Picture) -> Element<'a, Message> {
     let wall = match &now.firewall {
         Ok(true) => "On",
         Ok(false) => "Off",
@@ -341,10 +348,10 @@ fn the_network(look: Colors, now: &Picture) -> Element<'_, Message> {
         Ok(apps) if apps.is_empty() => {
             rows.push(inside(
                 look,
-                "No app runs in a sandbox, and every app has the network.",
+                "No app is on the switch, and every app has the network.",
             ));
         }
-        Ok(apps) => rows.extend(apps.iter().map(|app| sandbox_row(look, app))),
+        Ok(apps) => rows.extend(apps.iter().map(|app| sandbox_row(state, look, app))),
     }
     column![
         heading(look, "Network access"),
@@ -355,24 +362,40 @@ fn the_network(look: Colors, now: &Picture) -> Element<'_, Message> {
     .into()
 }
 
-/// One app Airlock lists: its name, how many of its sandboxes run, and its network switch.
-fn sandbox_row(look: Colors, app: &airlock::App) -> Element<'_, Message> {
-    let running = match app.running {
-        0 => "Not running".to_string(),
-        1 => "Running in a sandbox".to_string(),
-        count => format!("Running in {count} sandboxes"),
+/// One app Airlock lists: the name it is known by, how many of its sandboxes run, and its network
+/// switch. A Flatpak app is listed by its id, so its own name and icon come from its desktop entry
+/// when the drive has one.
+fn sandbox_row<'a>(
+    state: &'a Settings,
+    look: Colors,
+    app: &'a airlock::App,
+) -> Element<'a, Message> {
+    let entry = app
+        .flatpak
+        .then(|| state.apps.iter().find(|one| one.id == app.name))
+        .flatten();
+    let name = entry.map_or(app.name.as_str(), |one| one.name.as_str());
+    let running = match (app.flatpak, app.running) {
+        (true, 0) => "Flatpak app".to_string(),
+        (true, 1) => "Flatpak app, running".to_string(),
+        (true, count) => format!("Flatpak app, {count} running"),
+        (false, 0) => "Not running".to_string(),
+        (false, 1) => "Running in a sandbox".to_string(),
+        (false, count) => format!("Running in {count} sandboxes"),
     };
-    let name = app.name.clone();
+    let asked = app.name.clone();
+    // no icon: the firewall's row in the same group has none, and a program in a sandbox has no
+    // entry to take one from
     container(
         row![
             column![
-                line(look, &app.name),
+                line(look, name),
                 text(running).size(TEXT_SIZE).color(look.dim),
             ]
             .spacing(2)
             .width(Fill),
             switch(look, app.network, move |on| {
-                Message::Private(Asked::Network(name.clone(), on))
+                Message::Private(Asked::Network(asked.clone(), on))
             }),
         ]
         .spacing(12)
@@ -444,8 +467,9 @@ const LOCKING: &str = "Mod+L and Lock in the system menu lock the screen. Nothin
 const FIREWALL: &str = "Nothing on the network can open a connection to this machine. Ping and \
                         the answers of printers it looks for come through.";
 /// Under the network group.
-const SANDBOXES: &str = "rift run --sandbox starts a program in a sandbox. Its switch here takes \
-                         the network away from it, now and every time it starts, as rift net off \
+const SANDBOXES: &str = "Every Flatpak app is here as soon as it is installed, and so is every \
+                         program rift run --sandbox starts. Its switch takes the network away from \
+                         it, in what runs now and every time it starts again, as rift net off \
                          does.";
 /// Under the security level.
 const FIRMWARE: &str = "fwupd checks how the firmware protects the machine: secure boot, the TPM \
@@ -478,11 +502,20 @@ mod tests {
             ]),
             recent: true,
             firewall: Ok(true),
-            sandboxes: Ok(vec![airlock::App {
-                name: "fetcher".to_string(),
-                network: false,
-                running: 0,
-            }]),
+            sandboxes: Ok(vec![
+                airlock::App {
+                    name: "dev.rift.TestApp".to_string(),
+                    network: true,
+                    running: 1,
+                    flatpak: true,
+                },
+                airlock::App {
+                    name: "fetcher".to_string(),
+                    network: false,
+                    running: 0,
+                    flatpak: false,
+                },
+            ]),
         }));
         state
     }
@@ -500,8 +533,9 @@ mod tests {
                 "camera-app yes org.gnome.Snapshot",
                 "recent-files on",
                 "firewall on",
-                "sandboxed 1",
-                "app-network off fetcher",
+                "sandboxed 2",
+                "app-network on flatpak dev.rift.TestApp",
+                "app-network off command fetcher",
                 "device-security HSI:1 (v2.1.6)",
             ]
         );

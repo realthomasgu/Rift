@@ -4,11 +4,13 @@
 //! cuts the scope's first when it does not, and starts bwrap. bwrap builds the sandbox, with mounts,
 //! process ids and a user namespace of its own, and starts `airlock enter` inside it, which adds
 //! Landlock rules and a seccomp filter and runs the command. `airlock serve` is Airlock on the
-//! bus, keeping the switch in nftables. `airlock text` is a sandbox of its own, for the program
-//! that writes out the text of a document. Flatpak's permissions come later.
+//! bus, keeping the switch in nftables and the Flatpak overrides that put a Flatpak app on the
+//! same switch. `airlock text` is a sandbox of its own, for the program that writes out the text
+//! of a document.
 
 #[cfg(target_os = "linux")]
 mod confine;
+mod flatpak;
 mod net;
 mod policy;
 mod serve;
@@ -52,7 +54,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "airlock runs commands in a sandbox for rift run --sandbox and keeps their \
                  network switch for rift net.\n{USAGE}\n       {}\n       airlock serve \
-                 [--state <folder>] [--cgroups <folder>]",
+                 [--state <folder>] [--cgroups <folder>] [--flatpak <folder>]",
                 text::LINE
             );
             ExitCode::from(2)
@@ -295,11 +297,13 @@ fn confine(_read: &[PathBuf], _write: &[PathBuf], _network: bool) -> Result<(), 
 fn serve(args: &[String]) -> ExitCode {
     let mut state = PathBuf::from(librift::paths::AIRLOCK_STATE);
     let mut cgroups = PathBuf::from("/sys/fs/cgroup");
+    let mut flatpak = PathBuf::from(librift::paths::FLATPAK_SYSTEM);
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         let place = match arg.as_str() {
             "--state" => &mut state,
             "--cgroups" => &mut cgroups,
+            "--flatpak" => &mut flatpak,
             other => {
                 eprintln!("airlock serve: unknown argument `{other}`");
                 return ExitCode::from(2);
@@ -313,7 +317,8 @@ fn serve(args: &[String]) -> ExitCode {
             }
         }
     }
-    let result = serve::Switch::open(state.join(serve::OFF_FILE), cgroups).and_then(serve::serve);
+    let result =
+        serve::Switch::open(state.join(serve::OFF_FILE), cgroups, flatpak).and_then(serve::serve);
     if let Err(why) = result {
         eprintln!("airlock: {why}");
     }

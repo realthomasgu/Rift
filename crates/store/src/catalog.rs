@@ -183,15 +183,19 @@ pub fn settled(state: &mut Store, id: &str, removed: bool) {
     if removed {
         catalog.installed.retain(|one| one.id != id);
     } else if !catalog.has(id) {
+        // the page it was installed from knows its name, the room it takes and the remote it came
+        // from. flatpak says the same at the next full read of what is installed
+        let shown = state.shown.as_ref().filter(|shown| shown.id == id);
+        let about = shown
+            .and_then(|shown| shown.about.as_ref())
+            .and_then(|about| about.as_ref().ok());
         catalog.installed.push(Listed {
-            name: state
-                .shown
-                .as_ref()
-                .filter(|shown| shown.id == id)
-                .map_or_else(|| flatpak::tail(id), |shown| shown.name.clone()),
+            name: shown.map_or_else(|| flatpak::tail(id), |shown| shown.name.clone()),
             id: id.to_string(),
-            size: String::new(),
-            remote: String::new(),
+            size: about
+                .map(|about| about.installed.clone())
+                .unwrap_or_default(),
+            remote: shown.map(|shown| shown.remote.clone()).unwrap_or_default(),
         });
     }
 }

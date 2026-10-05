@@ -1,8 +1,10 @@
-//! The network switch in nftables. Airlock's table `inet airlock` holds a set of the cgroups of
-//! the sandboxes whose app has its network off, and drops every packet that leaves from or arrives
-//! at a socket in one of them, loopback included. A sandbox's cgroup is its scope in the owner's
-//! user manager, five levels below the root of the cgroup tree. nft reads a cgroup's path when it
-//! is added, so only scopes that run go into the set, and the set is made again on every change.
+//! The network switch in nftables. Airlock's table `inet airlock` holds a set of the cgroups
+//! whose app has its network off, and drops every packet that leaves from or arrives at a socket
+//! in one of them, loopback included. A cgroup here is a scope of the owner's user manager, five
+//! levels below the root of the cgroup tree: one `rift run --sandbox` made for a sandbox, or one
+//! flatpak made for an app of its own, which sit side by side in the same app.slice. nft reads a
+//! cgroup's path when it is added, so only scopes that run go into the set, and the set is made
+//! again on every change.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -11,22 +13,23 @@ use std::{fs, io};
 
 use librift::airlock::{app_of_scope, name_problem};
 
-/// How deep the scope of a sandbox is: user.slice, the account's slice, its user manager,
-/// app.slice, the scope.
+/// How deep a scope is: user.slice, the account's slice, its user manager, app.slice, the scope.
 pub const LEVEL: u32 = 5;
 
-/// The scope of one sandbox that runs now.
+/// The scope of one sandbox or one Flatpak app that runs now.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Scope {
     /// Its cgroup, from the root of the cgroup tree, without a slash in front.
     pub path: String,
-    /// The app it is a sandbox of.
+    /// The app it runs.
     pub app: String,
     /// The account whose user manager it is in.
     pub uid: u32,
+    /// Whether flatpak started it rather than `rift run --sandbox`.
+    pub flatpak: bool,
 }
 
-/// The scope of every sandbox in the cgroup tree at `root`, sorted by path.
+/// The scope of every sandbox and every Flatpak app in the cgroup tree at `root`, sorted by path.
 pub fn scopes(root: &Path) -> io::Result<Vec<Scope>> {
     let mut found = Vec::new();
     let users = match fs::read_dir(root.join("user.slice")) {
@@ -49,7 +52,7 @@ pub fn scopes(root: &Path) -> io::Result<Vec<Scope>> {
         };
         for unit in units.flatten() {
             let unit = unit.file_name();
-            if let Some((unit, app)) = unit
+            if let Some((unit, (app, flatpak))) = unit
                 .to_str()
                 .and_then(|unit| Some((unit, app_of_scope(unit)?)))
             {
@@ -57,6 +60,7 @@ pub fn scopes(root: &Path) -> io::Result<Vec<Scope>> {
                     path: format!("{apps}/{unit}"),
                     app: app.to_string(),
                     uid,
+                    flatpak,
                 });
             }
         }
@@ -76,17 +80,19 @@ fn uid_of_slice(slice: &str) -> Option<u32> {
 }
 
 /// The scope of a sandbox a process runs in, from its `/proc/<pid>/cgroup`, when the scope is in
-/// the user manager of `uid`.
+/// the user manager of `uid`. A Flatpak app's scope is not one: only `airlock start` asks, and it
+/// asks from the scope `rift run --sandbox` made for it.
 pub fn scope_of(cgroup: &str, uid: u32) -> Option<Scope> {
     let path = cgroup.lines().find_map(|line| line.strip_prefix("0::/"))?;
     let unit = path.strip_prefix(&format!(
         "user.slice/user-{uid}.slice/user@{uid}.service/app.slice/"
     ))?;
-    let app = app_of_scope(unit)?;
-    Some(Scope {
+    let (app, flatpak) = app_of_scope(unit)?;
+    (!flatpak).then(|| Scope {
         path: path.to_string(),
         app: app.to_string(),
         uid,
+        flatpak,
     })
 }
 
@@ -149,6 +155,7 @@ mod tests {
         let manager = "user.slice/user-1000.slice/user@1000.service";
         for folder in [
             &format!("{manager}/app.slice/app-airlock-fetcher-12.scope"),
+            &format!("{manager}/app.slice/app-flatpak-dev.rift.TestApp-1885090347.scope"),
             &format!("{manager}/app.slice/app-airlock-yt-dlp-40.scope"),
             &format!("{manager}/app.slice/app-org.gnome.Nautilus-3.scope"),
             &format!("{manager}/session.slice/app-airlock-hidden-5.scope"),
@@ -161,10 +168,11 @@ mod tests {
         }
         let found = scopes(&root);
         fs::remove_dir_all(&root).unwrap();
-        let scope = |path: &str, app: &str, uid| Scope {
+        let scope = |path: &str, app: &str, uid, flatpak| Scope {
             path: path.to_string(),
             app: app.to_string(),
             uid,
+            flatpak,
         };
         assert_eq!(
             found.unwrap(),
@@ -172,17 +180,26 @@ mod tests {
                 scope(
                     "user.slice/user-1000.slice/user@1000.service/app.slice/app-airlock-fetcher-12.scope",
                     "fetcher",
-                    1000
+                    1000,
+                    false
                 ),
                 scope(
                     "user.slice/user-1000.slice/user@1000.service/app.slice/app-airlock-yt-dlp-40.scope",
                     "yt-dlp",
-                    1000
+                    1000,
+                    false
+                ),
+                scope(
+                    "user.slice/user-1000.slice/user@1000.service/app.slice/app-flatpak-dev.rift.TestApp-1885090347.scope",
+                    "dev.rift.TestApp",
+                    1000,
+                    true
                 ),
                 scope(
                     "user.slice/user-1001.slice/user@1001.service/app.slice/app-airlock-fetcher-7.scope",
                     "fetcher",
-                    1001
+                    1001,
+                    false
                 ),
             ]
         );
@@ -199,12 +216,14 @@ mod tests {
                     .to_string(),
                 app: "fetcher".to_string(),
                 uid: 1000,
+                flatpak: false,
             })
         );
         assert_eq!(scope_of(cgroup, 1001), None);
         for cgroup in [
             "0::/user.slice/user-1000.slice/session-2.scope\n",
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-airlock-fetcher-12.scope/inner\n",
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-flatpak-dev.rift.TestApp-12.scope\n",
             "0::/system.slice/quasar.service\n",
             "",
         ] {

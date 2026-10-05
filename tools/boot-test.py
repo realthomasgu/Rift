@@ -7191,7 +7191,9 @@ def main():
                     if key == "camera-app":
                         said_camera["" if named.strip() == "-" else named.strip()] = word
                     elif key == "app-network":
-                        said_sandboxes[named.strip()] = word
+                        # app-network <on|off> <flatpak|command> <name>
+                        said_kind, _, said_name = named.strip().partition(" ")
+                        said_sandboxes[said_name.strip()] = (word, said_kind.strip())
                     elif key in ("camera-apps", "recent-files", "firewall", "sandboxed", "device-security"):
                         said_lines[key] = value.strip()
                 return (said_lines, said_camera, said_sandboxes) if "camera-apps" in said_lines else None
@@ -7209,10 +7211,11 @@ def main():
                 return said is not None and said[0].get("recent-files") == wanted and key_now in key_wanted
 
             def every_app_online(what):
-                """Whether rift net and the page both say no app is off and none runs in a sandbox."""
+                """Whether rift net and the page both say nothing is on the switch. No flatpak is
+                installed yet at this point in the test, so the switch knows no app at all."""
                 _, told = run("rift net", what)
                 said = privacy_page(f"the page for {what}")
-                return ("Every app has the network" in " ".join(without_console(told).split())
+                return ("No app is on the switch" in " ".join(without_console(told).split())
                         and said is not None and said[0].get("sandboxed") == "0")
 
             run("rift-settings --page privacy", "the Privacy and security page")
@@ -7273,7 +7276,7 @@ def main():
             status, output = run(f"rift net off {PRIVACY_APP}", "an app's network off in a terminal")
             if status != 0:
                 fail(f"rift net off {PRIVACY_APP} exited with {status}: {without_console(output).strip()[-200:]!r}")
-            if not wait_for(20, lambda: (privacy_page("the page after rift net off") or ({}, {}, {}))[2].get(PRIVACY_APP) == "off"):
+            if not wait_for(20, lambda: (privacy_page("the page after rift net off") or ({}, {}, {}))[2].get(PRIVACY_APP) == ("off", "command")):
                 fail(f"the Privacy page does not list {PRIVACY_APP} with its network off after rift net off: "
                      f"{privacy_page('the page once more')}")
             run(f"rift-settings --set app-network {PRIVACY_APP} on", f"{PRIVACY_APP}'s network on from the page")
@@ -9065,8 +9068,9 @@ def main():
     if status != 0:
         fail(f"airlock is not running: {without_console(output).strip()!r}")
     status, printed = sandboxed("rift net", "the apps before any is off")
-    if status != 0 or "Every app has the network" not in spaced(printed):
-        fail(f"rift net exited with {status} before any app was off, or did not say every app has the network")
+    # no flatpak is installed this early in the test, so the switch knows no app at all yet
+    if status != 0 or "No app is on the switch" not in spaced(printed):
+        fail(f"rift net exited with {status} before any app was off, or did not say no app is on the switch")
     run(f"mkdir -p {fetcher}", "the folder for the fetching sandboxes")
     status, printed = sandboxed(f"rift run --sandbox --folder {fetcher} --name fetcher {fetch}",
                                 "a sandbox that reaches the test server")
@@ -9110,7 +9114,7 @@ def main():
     if status != 0 or "The network is off for fetcher, also in the sandbox it runs in now." not in spaced(printed):
         fail(f"rift net off fetcher exited with {status} without saying it cut the running sandbox")
     status, printed = sandboxed("rift net", "the apps with fetcher off")
-    if status != 0 or not re.search(r"^fetcher\s+Off\s+1\s*$", printed, re.M):
+    if status != 0 or not re.search(r"^fetcher\s+Command\s+Off\s+1\s*$", printed, re.M):
         fail(f"rift net does not list fetcher off with one sandbox running: {printed.strip()!r}")
     _, output = run("sudo nft list table inet airlock", "airlock's table")
     table = without_console(output)
@@ -9171,7 +9175,7 @@ def main():
     if not said(without_console(output), "fetcher"):
         fail(f"airlock's file does not hold fetcher: {without_console(output).strip()!r}")
     status, printed = sandboxed("rift net", "the apps after airlock started again")
-    if status != 0 or not re.search(r"^fetcher\s+Off\s+\d+\s*$", printed, re.M):
+    if status != 0 or not re.search(r"^fetcher\s+Command\s+Off\s+\d+\s*$", printed, re.M):
         fail(f"rift net does not list fetcher off after airlock started again: {printed.strip()!r}")
     status, printed = sandboxed(f"rift run --sandbox --folder {fetcher} --name fetcher {fetch}",
                                 "a sandbox of fetcher after airlock started again")
@@ -9190,7 +9194,7 @@ def main():
     status, printed = sandboxed("sudo -u nobody busctl call dev.rift.Airlock /dev/rift/Airlock "
                                 "dev.rift.Airlock SetNetwork sb fetcher true", "the switch turned by nobody")
     _, listed = sandboxed("rift net", "the apps after nobody tried the switch")
-    if status == 0 or not re.search(r"^fetcher\s+Off\s+\d+\s*$", listed, re.M):
+    if status == 0 or not re.search(r"^fetcher\s+Command\s+Off\s+\d+\s*$", listed, re.M):
         fail(f"nobody turned fetcher's network on, busctl exited with {status}")
     status, printed = sandboxed("rift net on fetcher", "turning fetcher's network on")
     on_status, printed = sandboxed(f"rift run --sandbox --folder {fetcher} --name fetcher {fetch}",
@@ -9472,6 +9476,153 @@ def main():
         if said(printed, "document-read") or secret_words in printed:
             fail(f"the flatpak app still read {document} after the document portal took it back")
         ok("the network monitor refused the app without the network, and the app lost the file when it was unexported")
+
+        # 6g. the network switch takes Flatpak apps too. a Flatpak app never asks airlock as it
+        # starts, the way a sandbox does, so off writes the override in the system installation
+        # that unshares its network and flatpak reads it for every instance after that, and the
+        # instances already running are cut by their cgroups the way a sandbox's are. the test
+        # serves a file on the host at 10.0.2.2 again, and the app fetches it with the wget of the
+        # runtime's busybox
+        net_served = tempfile.mkdtemp(prefix="rift-flatpak-net-")
+        net_words = "Reached the test server 3141"
+        with open(os.path.join(net_served, "net.txt"), "w", encoding="utf-8") as f:
+            f.write(net_words + "\n")
+        net_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=net_served))
+        threading.Thread(target=net_server.serve_forever, daemon=True).start()
+        net_url = f"http://10.0.2.2:{net_server.server_address[1]}/net.txt"
+        net_override = f"/var/lib/flatpak/overrides/{app_id}"
+        net_shared = "/home/rift/flatpak-net"
+
+        def net_rows(what):
+            """What rift net says about each app: {name: (kind, network, running)}."""
+            _, told = sandboxed("rift net", what)
+            found = {}
+            for printed_line in told.splitlines():
+                columns = printed_line.split()
+                if len(columns) == 4 and columns[1] in ("Flatpak", "Command"):
+                    found[columns[0]] = (columns[1], columns[2], columns[3])
+            return found
+
+        def net_fetch(what):
+            """Runs the installed flatpak app as a one line fetch and answers what wget wrote."""
+            run(f"flatpak run --command=/usr/bin/wget {app_id} -q -O- -T 4 {net_url} > ~/flatpak-net.txt 2>&1", what)
+            _, got = run("cat ~/flatpak-net.txt", f"what {what} got")
+            return without_console(got)
+
+        for _ in range(20):
+            status, output = run(f"curl -s -m 4 {net_url}", "the test server from the vm again")
+            if status == 0 and net_words in output:
+                break
+            time.sleep(3)
+        else:
+            fail(f"the vm does not reach the test server at {net_url}")
+        net_listed = net_rows(f"the switch with {app_id} installed")
+        if net_listed.get(app_id) != ("Flatpak", "On", "0"):
+            fail(f"rift net does not list {app_id} as a Flatpak app with the network on: {net_listed}")
+        got = net_fetch("the flatpak app with its network on")
+        if net_words not in got:
+            fail(f"the flatpak app did not reach the test server before its network was off: {got.strip()[-200:]!r}")
+        ok(f"rift net lists {app_id} as a Flatpak app with the network on, and it reached {net_url}")
+
+        # off before it starts: the override is written and the next instance has no network at all
+        status, printed = sandboxed(f"rift net off {app_id}", f"{app_id}'s network off while nothing of it runs")
+        if status != 0 or f"The network is off for {app_id}." not in " ".join(printed.split()):
+            fail(f"rift net off {app_id} exited with {status} without saying its network is off")
+        _, output = run(f"sudo cat {net_override}", "the override airlock wrote")
+        if "shared=!network" not in without_console(output):
+            fail(f"{net_override} does not unshare the network: {without_console(output).strip()!r}")
+        _, output = run(f"flatpak override --system --show {app_id}", "what flatpak reads out of that override")
+        if "shared=!network" not in without_console(output):
+            fail(f"flatpak does not read the override airlock wrote: {without_console(output).strip()!r}")
+        got = net_fetch("the flatpak app started with its network off")
+        if net_words in got:
+            fail(f"the flatpak app reached the test server after its network was turned off: {got.strip()[-200:]!r}")
+        net_listed = net_rows(f"the switch with {app_id} off")
+        if net_listed.get(app_id) != ("Flatpak", "Off", "0"):
+            fail(f"rift net does not list {app_id} off: {net_listed}")
+        ok(f"with {app_id} off, airlock wrote {net_override}, flatpak reads it, and a new instance "
+           f"of the app found no network ({got.strip()[-80:]!r})")
+
+        # and off while it runs: the instance's own cgroup goes into airlock's table and the fetches
+        # it is in the middle of stop. the app keeps fetching into a file of a folder it is given
+        status, printed = sandboxed(f"rift net on {app_id}", f"{app_id}'s network on again")
+        if status != 0:
+            fail(f"rift net on {app_id} exited with {status}")
+        run(f"rm -rf {net_shared}; and mkdir -p {net_shared}", "the folder the running app writes into")
+        net_loop = (f"while true; do if wget -q -O- -T 4 {net_url} > /dev/null 2>&1; "
+                    f"then echo fetched; else echo nothing; fi >> {net_shared}/got.txt; sleep 1; done")
+        status, output = run(f"flatpak run --command=/bin/sh --filesystem={net_shared} {app_id} "
+                             f"-c '{net_loop}' < /dev/null > ~/flatpak-loop.txt 2>&1 &; disown",
+                             "a flatpak app that goes on fetching")
+        if status != 0:
+            fail(f"the flatpak app that goes on fetching could not be started: {without_console(output).strip()!r}")
+
+        def net_last(seconds, wanted, what):
+            """Waits for the running app's file to end in this word twice over, so the change is
+            the app's own and not a line written before the switch turned."""
+            until = time.monotonic() + seconds
+            while time.monotonic() < until:
+                _, output = run(f"tail -n 2 {net_shared}/got.txt", what)
+                lines = [line.strip() for line in without_console(output).splitlines() if line.strip() in ("fetched", "nothing")]
+                if len(lines) == 2 and lines[0] == wanted and lines[1] == wanted:
+                    return True
+                time.sleep(1)
+            _, output = run(f"cat {net_shared}/got.txt; cat ~/flatpak-loop.txt", f"what the running app wrote for {what}")
+            fail(f"the running flatpak app did not say {wanted} for {what}: {without_console(output).strip()[-400:]!r}")
+            return False
+
+        net_last(120, "fetched", "the running app before its network was off")
+        _, output = run(f"systemctl --user list-units --full --plain --no-legend 'app-flatpak-{app_id}-*' | cat",
+                        "the running app's scope")
+        net_units = re.findall(rf"app-flatpak-{re.escape(app_id)}-\d+\.scope", without_console(output))
+        print(f"\nboot-test: the user manager lists {net_units}", flush=True)
+        if len(net_units) != 1:
+            fail(f"the user manager lists {net_units} for {app_id}, expected the one scope of the running app")
+        status, printed = sandboxed(f"rift net off {app_id}", f"{app_id}'s network off while it runs")
+        if status != 0 or "also in the sandbox it runs in now." not in " ".join(printed.split()):
+            fail(f"rift net off {app_id} exited with {status} without saying it cut the instance that runs")
+        _, output = run("sudo nft list table inet airlock", "airlock's table with the flatpak app in it")
+        net_table = without_console(output)
+        print(f"\nboot-test: sudo nft list table inet airlock printed:\n{net_table}", flush=True)
+        if net_units[0] not in net_table:
+            fail(f"airlock's table does not hold {net_units[0]}")
+        net_last(120, "nothing", "the running app after its network was off")
+        net_listed = net_rows(f"the switch with {app_id} off while it runs")
+        if net_listed.get(app_id) != ("Flatpak", "Off", "1"):
+            fail(f"rift net does not list {app_id} off with one running: {net_listed}")
+
+        # the Privacy page lists it under its own name, with the switch the page turns back on
+        if args.desktop and args.lens:
+            open_from_menu(SETTINGS_APP, SETTINGS_APP_ID)
+            if not wait_for(120, lambda: settings_state("the page Settings opens on") or None):
+                fail("Settings did not open from the Applications menu")
+            run("rift-settings --page privacy", "the Privacy and security page with a Flatpak app on the switch")
+            if not wait_for(120, lambda: settings_state("the Privacy page").get("page") == "privacy"):
+                fail("rift-settings --page privacy did not show that page")
+            if not wait_for(120, lambda: (privacy_page("the page with the flatpak app") or ({}, {}, {}))[2]
+                            .get(app_id) == ("off", "flatpak")):
+                fail(f"the Privacy page does not list {app_id} as a Flatpak app with its network off: "
+                     f"{privacy_page('the page once more')}")
+            look(f"{SETTINGS_APP} on the Privacy page with a Flatpak app on the switch",
+                 f"{flatpak_stem}-settings-privacy-flatpak{flatpak_extension}", 60,
+                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            run(f"rift-settings --set app-network {app_id} on", f"{app_id}'s network on from the page")
+            if not wait_for(120, lambda: (privacy_page("the page after the switch") or ({}, {}, {}))[2]
+                            .get(app_id) == ("on", "flatpak")):
+                fail(f"the Privacy page did not give {app_id} the network back")
+            close_app(SETTINGS_APP, SETTINGS_APP_ID)
+        else:
+            status, printed = sandboxed(f"rift net on {app_id}", f"{app_id}'s network on once more")
+            if status != 0:
+                fail(f"rift net on {app_id} exited with {status}")
+        net_last(120, "fetched", "the running app after its network came back")
+        status, _ = run(f"sudo test -e {net_override}", "whether the override is still there")
+        if status == 0:
+            fail(f"{net_override} is still there after {app_id} was given the network back")
+        run(f"flatpak kill {app_id}; or true", "the flatpak app that goes on fetching, stopped")
+        net_server.shutdown()
+        ok(f"rift net off cut {net_units[0]} while it ran, the Privacy page gave {app_id} the network "
+           f"back and took {net_override} away, and the running app fetched again")
 
     # 7. the update. the second drive holds two newer versions' files. systemd-sysupdate checks them
     # against SHA256SUMS, writes the store and its verity partition into the free slot under the

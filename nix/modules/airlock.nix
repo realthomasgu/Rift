@@ -1,8 +1,9 @@
 # airlock: sandboxing. bwrap for rift run --sandbox, which airlock runs unprivileged in a user
 # namespace, each sandbox in a scope of the user manager named for its app. airlock serve answers on
 # the system bus as dev.rift.Airlock and keeps the network switch for those apps in its own
-# nftables table. flatpak with its portals for gui apps has a switch of its own. no host disk is
-# visible to any sandbox.
+# nftables table. a flatpak app is on the same switch: flatpak starts it in a scope beside the
+# sandboxes, and airlock writes the override in the system installation that unshares its network.
+# no host disk is visible to any sandbox.
 {
   config,
   lib,
@@ -91,6 +92,12 @@ in
       }
       (lib.mkIf cfg.flatpak.enable {
         services.flatpak.enable = true;
+        # flatpak reads the overrides of the installation an app is in and nowhere else, and
+        # everything the Store and Welcome install goes into the system one. airlock writes a file
+        # here for each app whose network is off, so the folder has to be there before it starts,
+        # and it is the one place outside its own state that airlock may write
+        systemd.tmpfiles.rules = [ "d /var/lib/flatpak/overrides 0755 root root -" ];
+        systemd.services.airlock.serviceConfig.ReadWritePaths = [ "-/var/lib/flatpak/overrides" ];
         # xdg-desktop-portal answers documents, the network monitor, proxies, trash and a few more
         # by itself, over the session bus. gtk's backend is the rest: the file chooser, the app
         # chooser, printing and the appearance settings, drawn in horizon's session

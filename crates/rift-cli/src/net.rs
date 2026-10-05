@@ -1,5 +1,5 @@
-//! `rift net`: the network switch Airlock keeps for each app that runs in a sandbox. Lists the
-//! apps that are off or running, and turns an app's network off or on.
+//! `rift net`: the network switch Airlock keeps for each app that runs in a sandbox, Flatpak apps
+//! among them. Lists the apps it knows, and turns an app's network off or on.
 
 use std::fmt::Write as _;
 use std::process::ExitCode;
@@ -12,9 +12,10 @@ const USAGE: &str = "Usage: rift net [list]\n       rift net off <app>\n       r
 
 const HELP: &str = "Airlock keeps a network switch for each app that runs in a sandbox. off \
 takes the network away from an app, at once in the sandboxes it runs in now and in every one it \
-starts later, until on gives it back. An app is named after its command, or by --name when rift \
-run --sandbox starts it. list shows the apps whose network is off and the apps that run in a \
-sandbox now.";
+starts later, until on gives it back. A Flatpak app is named by its id and is on the switch as \
+soon as it is installed; the others are named after the command, or by --name when rift run \
+--sandbox starts them. list shows every Flatpak app that is installed, every app whose network \
+is off, and every app that runs in a sandbox now.";
 
 pub fn run(args: &[String]) -> ExitCode {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -38,7 +39,10 @@ pub fn run(args: &[String]) -> ExitCode {
 fn list() -> ExitCode {
     match airlock::apps() {
         Ok(apps) if apps.is_empty() => {
-            println!("Every app has the network, and none runs in a sandbox now.");
+            println!(
+                "No app is on the switch: no Flatpak app is installed, none runs in a sandbox, \
+                 and every app has the network."
+            );
             ExitCode::SUCCESS
         }
         Ok(apps) => {
@@ -83,6 +87,11 @@ fn switched(app: &str, on: bool, running: u32) -> String {
     }
 }
 
+/// What kind of app a row is: a Flatpak app by its id, or a command `rift run --sandbox` started.
+fn kind(app: &App) -> &'static str {
+    if app.flatpak { "Flatpak" } else { "Command" }
+}
+
 /// The apps under a header, their columns lined up.
 fn rows(apps: &[App]) -> String {
     let width = apps
@@ -91,10 +100,16 @@ fn rows(apps: &[App]) -> String {
         .chain(["App".len()])
         .max()
         .unwrap_or(0);
-    let mut out = format!("{:<width$}  Network  Running\n", "App");
+    let mut out = format!("{:<width$}  Kind     Network  Running\n", "App");
     for app in apps {
         let network = if app.network { "On" } else { "Off" };
-        let _ = writeln!(out, "{:<width$}  {network:<7}  {}", app.name, app.running);
+        let _ = writeln!(
+            out,
+            "{:<width$}  {:<7}  {network:<7}  {}",
+            app.name,
+            kind(app),
+            app.running
+        );
     }
     out
 }
@@ -118,18 +133,24 @@ mod tests {
 
     #[test]
     fn apps_line_up_under_a_header() {
-        let app = |name: &str, network, running| App {
+        let app = |name: &str, network, running, flatpak| App {
             name: name.to_string(),
             network,
             running,
+            flatpak,
         };
         assert_eq!(
-            rows(&[app("curl", true, 2), app("fetcher", false, 0)]),
-            "App      Network  Running\ncurl     On       2\nfetcher  Off      0\n"
+            rows(&[
+                app("dev.rift.TestApp", false, 1, true),
+                app("fetcher", true, 0, false),
+            ]),
+            "App               Kind     Network  Running\n\
+             dev.rift.TestApp  Flatpak  Off      1\n\
+             fetcher           Command  On       0\n"
         );
         assert_eq!(
-            rows(&[app("hx", false, 1)]),
-            "App  Network  Running\nhx   Off      1\n"
+            rows(&[app("hx", false, 1, false)]),
+            "App  Kind     Network  Running\nhx   Command  Off      1\n"
         );
     }
 }

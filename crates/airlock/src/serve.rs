@@ -1,11 +1,18 @@
 //! Airlock on the system bus: `dev.rift.Airlock` at `/dev/rift/Airlock`.
 //!
-//! `List` returns every app whose network is off or that runs in a sandbox now. `SetNetwork` turns
-//! an app's network off or on, in its sandboxes that run now and in every one it starts later, and
-//! keeps the apps that are off in a file. `Starting` is what `airlock start` asks from inside the
-//! scope of a new sandbox before bwrap runs: when the app's network is off, the scope's is cut
-//! before the answer goes back. When the service starts it makes its table again from that file and
-//! the scopes that run. The table stays when the service stops, so what is off stays off.
+//! `List` returns every app the system installation has as a Flatpak app, every app whose network
+//! is off, and every app that runs in a sandbox now. `SetNetwork` turns an app's network off or
+//! on, in the sandboxes it runs in now and in every one it starts later, and keeps the apps that
+//! are off in a file. `Starting` is what `airlock start` asks from inside the scope of a new
+//! sandbox before bwrap runs: when the app's network is off, the scope's is cut before the answer
+//! goes back.
+//!
+//! A Flatpak app never asks as it starts, so the switch writes it an override that unshares its
+//! network instead, which flatpak reads for every instance it starts after that. The scopes of the
+//! instances already running are cut the same way a sandbox's is. When the service starts it makes
+//! its table again from the file and the scopes that run, and writes the overrides of the system
+//! installation from the file too, so the file is what the drive says. The table stays when the
+//! service stops, so what is off stays off.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -19,6 +26,7 @@ use librift::airlock::name_problem;
 use zbus::fdo;
 use zbus::message::Header;
 
+use crate::flatpak;
 use crate::net::{self, Scope};
 
 /// The file in the state folder that holds the apps whose network is off.
@@ -32,27 +40,62 @@ const TRIES: usize = 5;
 const NOT_A_SANDBOX: &str = "Airlock starts a sandbox only from the scope rift run --sandbox \
 makes for it, and this process is not in one.";
 
-/// The apps that are off, where that is kept, and where the scopes are.
+/// The apps that are off, where that is kept, where the scopes are, and the Flatpak installation
+/// whose overrides the switch writes.
 pub struct Switch {
     off: BTreeSet<String>,
     file: PathBuf,
     cgroups: PathBuf,
+    flatpak: PathBuf,
 }
 
 impl Switch {
     /// Reads which apps are off from `file`, when it is there.
-    pub fn open(file: PathBuf, cgroups: PathBuf) -> Result<Self, String> {
+    pub fn open(file: PathBuf, cgroups: PathBuf, flatpak: PathBuf) -> Result<Self, String> {
         let off = match fs::read_to_string(&file) {
             Ok(text) => net::read_off(&text),
             Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeSet::new(),
             Err(error) => return Err(format!("Could not read {}: {error}.", file.display())),
         };
-        Ok(Self { off, file, cgroups })
+        Ok(Self {
+            off,
+            file,
+            cgroups,
+            flatpak,
+        })
     }
 
     /// Makes the table again, with the scopes of the apps that are off in its set.
     pub fn make_table(&self) -> Result<(), String> {
         self.apply(true)
+    }
+
+    /// The app ids the Flatpak installation has.
+    fn installed(&self) -> Result<BTreeSet<String>, String> {
+        flatpak::installed(&self.flatpak).map_err(|error| {
+            format!(
+                "Could not read the apps in {}: {error}.",
+                self.flatpak.display()
+            )
+        })
+    }
+
+    /// Writes the override of every app that is off, and takes the network back out of the
+    /// override of every app the installation has that is not off. The file Airlock keeps is the
+    /// one place that says whether an app has the network, so an override set by hand with
+    /// `flatpak override` is put back the next time this runs.
+    ///
+    /// # Errors
+    ///
+    /// A sentence when an override cannot be read or written.
+    pub fn write_overrides(&self) -> Result<(), String> {
+        for app in &self.off {
+            flatpak::set_override(&self.flatpak, app, true)?;
+        }
+        for app in self.installed()?.difference(&self.off) {
+            flatpak::set_override(&self.flatpak, app, false)?;
+        }
+        Ok(())
     }
 
     fn apply(&self, whole: bool) -> Result<(), String> {
@@ -86,18 +129,27 @@ impl Switch {
         })
     }
 
-    fn list(&self) -> Result<Vec<(String, bool, u32)>, String> {
-        let mut apps: BTreeMap<String, (bool, u32)> = self
+    fn list(&self) -> Result<Vec<(String, bool, u32, bool)>, String> {
+        // how many of it run, and whether it is a Flatpak app rather than a command's name
+        let mut apps: BTreeMap<String, (u32, bool)> = self
             .off
             .iter()
-            .map(|app| (app.clone(), (false, 0)))
+            .map(|app| (app.clone(), (0, false)))
             .collect();
+        for app in self.installed()? {
+            apps.entry(app).or_default().1 = true;
+        }
         for scope in self.scopes()? {
-            apps.entry(scope.app).or_insert((true, 0)).1 += 1;
+            let seen = apps.entry(scope.app).or_default();
+            seen.0 += 1;
+            seen.1 |= scope.flatpak;
         }
         Ok(apps
             .into_iter()
-            .map(|(app, (network, running))| (app, network, running))
+            .map(|(app, (running, flatpak))| {
+                let network = !self.off.contains(&app);
+                (app, network, running, flatpak)
+            })
             .collect())
     }
 
@@ -111,9 +163,14 @@ impl Switch {
         } else {
             self.off.insert(app.to_string());
         }
-        // the set first, then the file. when either fails, both go back to what they were
-        if let Err(why) = self.apply(false).and_then(|()| self.keep()) {
+        // the override first, so nothing flatpak starts while this runs is missed, then the set
+        // for what runs already, then the file. when any of them fails, all three go back
+        let changed = flatpak::set_override(&self.flatpak, app, !on)
+            .and_then(|()| self.apply(false))
+            .and_then(|()| self.keep());
+        if let Err(why) = changed {
             self.off = before;
+            let _ = flatpak::set_override(&self.flatpak, app, self.off.contains(app));
             let _ = self.apply(false);
             return Err(fdo::Error::Failed(why));
         }
@@ -186,9 +243,10 @@ impl Airlock {
 
 #[zbus::interface(name = "dev.rift.Airlock")]
 impl Airlock {
-    /// Every app whose network is off or that runs in a sandbox now: its name, whether it has the
-    /// network, and how many of its sandboxes run.
-    fn list(&self) -> fdo::Result<Vec<(String, bool, u32)>> {
+    /// Every app the Flatpak installation has, whose network is off, or that runs in a sandbox
+    /// now: its name, whether it has the network, how many of its sandboxes run, and whether it is
+    /// a Flatpak app.
+    fn list(&self) -> fdo::Result<Vec<(String, bool, u32, bool)>> {
         self.switch()?.list().map_err(fdo::Error::Failed)
     }
 
@@ -250,6 +308,15 @@ pub fn serve(switch: Switch) -> Result<(), String> {
         "airlock: made the table, the network is off for: {}",
         off.join(" ")
     );
+    // the nft half holds without this, so a Flatpak installation that cannot be written is said
+    // and not fatal
+    match switch.write_overrides() {
+        Ok(()) => println!(
+            "airlock: wrote the flatpak overrides in {}",
+            switch.flatpak.display()
+        ),
+        Err(why) => println!("airlock: could not write the flatpak overrides: {why}"),
+    }
     let component = Component::Airlock;
     let airlock = Airlock {
         switch: Mutex::new(switch),

@@ -174,6 +174,9 @@ pub mod paths {
     pub const QUASAR_STATE: &str = "/var/lib/rift/quasar";
     /// Which apps have their network off, kept by Airlock.
     pub const AIRLOCK_STATE: &str = "/var/lib/rift/airlock";
+    /// The Flatpak installation every app the Store and Welcome install goes into. Its
+    /// `overrides` folder is the other half of Airlock's network switch.
+    pub const FLATPAK_SYSTEM: &str = "/var/lib/flatpak";
     /// Phase marker written by the image.
     pub const PHASE: &str = "/etc/rift/phase";
     /// The logo in characters, without its colours, installed by the image.

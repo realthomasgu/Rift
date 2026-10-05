@@ -2,8 +2,9 @@
 //! runs in, and the network switch on the system bus.
 //!
 //! Every sandbox runs in a scope of the owner's user manager named
-//! `app-airlock-<app>-<number>.scope`, so Airlock finds an app's sandboxes by their scopes and
-//! cuts their network by their cgroups.
+//! `app-airlock-<app>-<number>.scope`, and flatpak starts each of its apps in one named
+//! `app-flatpak-<id>-<number>.scope` beside it, so Airlock finds what an app runs in by its scopes
+//! and cuts their network by their cgroups. An app id fits the name rule as it is.
 
 #[cfg(feature = "bus")]
 use std::time::Duration;
@@ -17,6 +18,9 @@ const SWITCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How the unit name of the scope of every sandbox starts.
 pub const SCOPE_PREFIX: &str = "app-airlock-";
+
+/// How the unit name of the scope flatpak starts each of its apps in begins.
+pub const FLATPAK_PREFIX: &str = "app-flatpak-";
 
 /// The longest name an app can have.
 pub const NAME_MAX: usize = 64;
@@ -45,27 +49,31 @@ pub fn scope_unit(app: &str, number: u32) -> String {
     format!("{SCOPE_PREFIX}{app}-{number}.scope")
 }
 
-/// The app whose sandbox runs in the scope with this unit name, or `None` when it is not the scope
-/// of a sandbox.
+/// The app that runs in the scope with this unit name and whether it is a Flatpak app rather than
+/// a sandbox, or `None` when the scope is neither's.
 #[must_use]
-pub fn app_of_scope(unit: &str) -> Option<&str> {
-    let (app, number) = unit
-        .strip_prefix(SCOPE_PREFIX)?
-        .strip_suffix(".scope")?
-        .rsplit_once('-')?;
+pub fn app_of_scope(unit: &str) -> Option<(&str, bool)> {
+    let (rest, flatpak) = match unit.strip_prefix(SCOPE_PREFIX) {
+        Some(rest) => (rest, false),
+        None => (unit.strip_prefix(FLATPAK_PREFIX)?, true),
+    };
+    let (app, number) = rest.strip_suffix(".scope")?.rsplit_once('-')?;
     let numbered = !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
-    (numbered && name_problem(app).is_none()).then_some(app)
+    (numbered && name_problem(app).is_none()).then_some((app, flatpak))
 }
 
 /// An app as the network switch sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct App {
-    /// Its name.
+    /// Its name, which for a Flatpak app is its id.
     pub name: String,
     /// Whether it has the network.
     pub network: bool,
     /// How many of its sandboxes run now.
     pub running: u32,
+    /// Whether it is a Flatpak app: one the system installation has, or one running in a scope
+    /// flatpak started. The others are named after the command `rift run --sandbox` was given.
+    pub flatpak: bool,
 }
 
 /// Every app whose network is off or that runs in a sandbox now, by name.
@@ -78,15 +86,16 @@ pub fn apps() -> Result<Vec<App>, String> {
     let airlock = Component::Airlock;
     let connection = bus::connect(bus::PROPERTY_TIMEOUT)?;
     let proxy = bus::proxy(&connection, airlock)?;
-    let apps: Vec<(String, bool, u32)> = proxy
+    let apps: Vec<(String, bool, u32, bool)> = proxy
         .call("List", &())
         .map_err(|e| bus::sentence(airlock, e))?;
     Ok(apps
         .into_iter()
-        .map(|(name, network, running)| App {
+        .map(|(name, network, running, flatpak)| App {
             name,
             network,
             running,
+            flatpak,
         })
         .collect())
 }
@@ -168,9 +177,12 @@ mod tests {
         assert_eq!(scope_unit("yt-dlp", 4711), "app-airlock-yt-dlp-4711.scope");
         assert_eq!(
             app_of_scope("app-airlock-yt-dlp-4711.scope"),
-            Some("yt-dlp")
+            Some(("yt-dlp", false))
         );
-        assert_eq!(app_of_scope("app-airlock-curl-1.scope"), Some("curl"));
+        assert_eq!(
+            app_of_scope("app-airlock-curl-1.scope"),
+            Some(("curl", false))
+        );
         for unit in [
             "app-airlock-curl.scope",
             "app-airlock-curl-.scope",
@@ -179,6 +191,26 @@ mod tests {
             "app-airlock-curl-12.service",
             "app-org.gnome.Nautilus-12.scope",
             "session-2.scope",
+        ] {
+            assert_eq!(app_of_scope(unit), None, "{unit}");
+        }
+    }
+
+    #[test]
+    fn a_flatpak_scope_names_its_app_id() {
+        // the numbers flatpak gives are its own, not a process id, and the id can hold a dash
+        assert_eq!(
+            app_of_scope("app-flatpak-dev.rift.TestApp-1885090347.scope"),
+            Some(("dev.rift.TestApp", true))
+        );
+        assert_eq!(
+            app_of_scope("app-flatpak-org.kde.foo-bar-12.scope"),
+            Some(("org.kde.foo-bar", true))
+        );
+        for unit in [
+            "app-flatpak-dev.rift.TestApp.scope",
+            "app-flatpak--12.scope",
+            "app-flatpak-dev.rift.TestApp-12.service",
         ] {
             assert_eq!(app_of_scope(unit), None, "{unit}");
         }
