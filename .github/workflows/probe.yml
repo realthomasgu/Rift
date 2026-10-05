@@ -1,0 +1,100 @@
+name: welcome probe
+on:
+  workflow_dispatch:
+
+jobs:
+  verity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Allow user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Can veritysetup work out the root hash systemd-repart published
+        run: |
+          set +e
+          # the image's own systemd, so this is the same repart that builds the store's verity tree
+          systemd=$(nix eval --raw '.#nixosConfigurations.rift.config.image.repart.package.outPath')
+          echo "systemd: $systemd"
+          repart=$systemd/bin/systemd-repart
+          V=$(nix build --inputs-from . nixpkgs#cryptsetup.bin --no-link --print-out-paths)/bin/veritysetup
+          echo "veritysetup: $V"
+          "$V" --version
+          seed=0867da16-f251-457d-a9e8-c31f9a3c220b
+          mkdir -p defs out
+          # 64 MiB of data that does not compress, the way the store's erofs does not
+          head -c 67108864 /dev/urandom > out/data.bin
+          cat > defs/10-store-verity.conf <<EOF
+          [Partition]
+          Type=usr-verity
+          Label=store-verity_test
+          Minimize=off
+          SizeMinBytes=16M
+          SizeMaxBytes=16M
+          Verity=hash
+          VerityMatchKey=store
+          VerityDataBlockSizeBytes=4096
+          VerityHashBlockSizeBytes=4096
+          EOF
+          cat > defs/20-store.conf <<EOF
+          [Partition]
+          Type=usr
+          Label=store_test
+          CopyBlocks=$PWD/out/data.bin
+          Minimize=best
+          SizeMaxBytes=128M
+          Verity=data
+          VerityMatchKey=store
+          EOF
+          echo "--- repart ---"
+          sudo "$repart" --empty=create --size=auto --seed="$seed" \
+            --definitions=defs --json=pretty --dry-run=no out/test.raw
+          echo "repart: $?"
+          sudo chown "$(id -u)" out/test.raw
+          echo "--- the partitions it made ---"
+          sfdisk -J out/test.raw | jq -r '.partitiontable.partitions[] | "\(.name) start \(.start) size \(.size)"'
+          table=$(sfdisk -J out/test.raw)
+          cut() {
+            local prefix=$1 file=$2 start size
+            start=$(jq -r --arg p "$prefix" '.partitiontable.partitions[] | select(.name | startswith($p)) | .start' <<<"$table")
+            size=$(jq -r --arg p "$prefix" '.partitiontable.partitions[] | select(.name | startswith($p)) | .size' <<<"$table")
+            dd if=out/test.raw of="$file" skip="$start" count="$size" bs=512 status=none
+            echo "$file: $(stat -c %s "$file") bytes"
+          }
+          cut store-verity_ out/tree.bin
+          cut store_ out/store.bin
+          echo "--- what the published tree says about itself ---"
+          "$V" dump out/tree.bin
+          dump=$("$V" dump out/tree.bin 2>/dev/null)
+          val() { printf '%s\n' "$dump" | awk -F: -v k="$1" 'index($0, k) == 1 { sub(/^[^:]*:[ \t]*/, ""); print; exit }'; }
+          db=$(val "Data block size"); hb=$(val "Hash block size")
+          salt=$(val "Salt"); blocks=$(val "Data blocks"); uid=$(val "UUID")
+          echo "data block $db, hash block $hb, blocks $blocks"
+          echo "uuid $uid"
+          echo "salt $salt"
+          echo "--- veritysetup format over the same data, with those parameters ---"
+          "$V" format --data-block-size="$db" --hash-block-size="$hb" \
+            --data-blocks="$blocks" --salt="$salt" --uuid="$uid" out/store.bin out/mine.bin
+          echo "format: $?"
+          echo "--- the two trees ---"
+          ls -l out/tree.bin out/mine.bin
+          cmp out/tree.bin out/mine.bin && echo "SAME BYTES" || echo "different bytes"
+          # the tree partition is padded to 16M, so compare only as far as the real tree goes
+          cmp -n "$(stat -c %s out/mine.bin)" out/tree.bin out/mine.bin \
+            && echo "SAME TREE as far as it goes" || echo "DIFFERENT TREE"
+          echo "--- and once more, to show it is not luck ---"
+          "$V" format --data-block-size="$db" --hash-block-size="$hb" \
+            --data-blocks="$blocks" --salt="$salt" --uuid="$uid" out/store.bin out/again.bin | tail -3
+          cmp out/mine.bin out/again.bin && echo "format is deterministic" || echo "format is not deterministic"
+      - name: What the salt is made of
+        run: |
+          set +e
+          # repart derives the verity salt as hmac_sha256(seed, "verity-salt")
+          python3 - <<'PY'
+          import hashlib, hmac, uuid
+          seed = uuid.UUID("0867da16-f251-457d-a9e8-c31f9a3c220b")
+          print("seed  ", seed)
+          print("salt  ", hmac.new(seed.bytes, b"verity-salt", hashlib.sha256).hexdigest())
+          print("uuid in", hmac.new(seed.bytes, b"verity-uuid", hashlib.sha256).hexdigest())
+          PY
