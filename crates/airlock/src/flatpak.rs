@@ -30,8 +30,8 @@ const NETWORK: &str = "network";
 /// it: it is not an app.
 const GLOBAL: &str = "global";
 
-/// The app ids the installation at `root` has: the folders under its `app`. An installation that
-/// is not there yet has none.
+/// The app ids the installation at `root` has: the folders under its `app` that hold a deployed
+/// app. An installation that is not there yet has none.
 ///
 /// # Errors
 ///
@@ -45,12 +45,27 @@ pub fn installed(root: &Path) -> io::Result<BTreeSet<String>> {
     };
     for app in apps.flatten() {
         if let Some(id) = app.file_name().to_str() {
-            if id != GLOBAL && name_problem(id).is_none() {
+            if id != GLOBAL && name_problem(id).is_none() && deployed(&app.path()) {
                 found.insert(id.to_string());
             }
         }
     }
     Ok(found)
+}
+
+/// Whether an app's folder holds a deployed app rather than what an uninstall left behind. flatpak
+/// deploys an app at `<id>/<architecture>/<branch>/active`.
+fn deployed(app: &Path) -> bool {
+    let Ok(architectures) = fs::read_dir(app) else {
+        return false;
+    };
+    architectures.flatten().any(|architecture| {
+        fs::read_dir(architecture.path()).is_ok_and(|branches| {
+            branches
+                .flatten()
+                .any(|branch| branch.path().join("active").exists())
+        })
+    })
 }
 
 /// Where the override of one app of the installation at `root` is.
@@ -220,7 +235,13 @@ mod tests {
             "[Context]\nshared=!network;\n"
         );
         assert_eq!(installed(&root).unwrap(), BTreeSet::new());
-        for folder in ["app/dev.rift.TestApp", "app/org.videolan.VLC", "runtime/x"] {
+        for folder in [
+            "app/dev.rift.TestApp/x86_64/test/active",
+            "app/org.videolan.VLC/x86_64/stable/active",
+            // what an uninstall leaves behind, and a runtime, which is not an app
+            "app/org.gimp.GIMP/x86_64",
+            "runtime/dev.rift.TestPlatform/x86_64/test/active",
+        ] {
             fs::create_dir_all(root.join(folder)).unwrap();
         }
         assert_eq!(

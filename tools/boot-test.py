@@ -9491,7 +9491,7 @@ def main():
         threading.Thread(target=net_server.serve_forever, daemon=True).start()
         net_url = f"http://10.0.2.2:{net_server.server_address[1]}/net.txt"
         net_override = f"/var/lib/flatpak/overrides/{app_id}"
-        net_shared = "/home/rift/flatpak-net"
+        net_shared = "/home/rift/fnet"
 
         def net_rows(what):
             """What rift net says about each app: {name: (kind, network, running)}."""
@@ -9502,6 +9502,18 @@ def main():
                 if len(columns) == 4 and columns[1] in ("Flatpak", "Command"):
                     found[columns[0]] = (columns[1], columns[2], columns[3])
             return found
+
+        def net_until(wanted, what):
+            """Waits for rift net to say this about the app. An instance that has just ended can
+            still have a scope for a moment, so the count settles rather than being read once."""
+            until = time.monotonic() + 60
+            while True:
+                found = net_rows(what)
+                if found.get(app_id) == wanted:
+                    return found
+                if time.monotonic() > until:
+                    fail(f"rift net does not say {wanted} about {app_id} for {what}: {found}")
+                time.sleep(2)
 
         def net_fetch(what):
             """Runs the installed flatpak app as a one line fetch and answers what wget wrote."""
@@ -9516,9 +9528,7 @@ def main():
             time.sleep(3)
         else:
             fail(f"the vm does not reach the test server at {net_url}")
-        net_listed = net_rows(f"the switch with {app_id} installed")
-        if net_listed.get(app_id) != ("Flatpak", "On", "0"):
-            fail(f"rift net does not list {app_id} as a Flatpak app with the network on: {net_listed}")
+        net_until(("Flatpak", "On", "0"), f"the switch with {app_id} installed")
         got = net_fetch("the flatpak app with its network on")
         if net_words not in got:
             fail(f"the flatpak app did not reach the test server before its network was off: {got.strip()[-200:]!r}")
@@ -9537,9 +9547,7 @@ def main():
         got = net_fetch("the flatpak app started with its network off")
         if net_words in got:
             fail(f"the flatpak app reached the test server after its network was turned off: {got.strip()[-200:]!r}")
-        net_listed = net_rows(f"the switch with {app_id} off")
-        if net_listed.get(app_id) != ("Flatpak", "Off", "0"):
-            fail(f"rift net does not list {app_id} off: {net_listed}")
+        net_until(("Flatpak", "Off", "0"), f"the switch with {app_id} off")
         ok(f"with {app_id} off, airlock wrote {net_override}, flatpak reads it, and a new instance "
            f"of the app found no network ({got.strip()[-80:]!r})")
 
@@ -9549,10 +9557,11 @@ def main():
         if status != 0:
             fail(f"rift net on {app_id} exited with {status}")
         run(f"rm -rf {net_shared}; and mkdir -p {net_shared}", "the folder the running app writes into")
-        net_loop = (f"while true; do if wget -q -O- -T 4 {net_url} > /dev/null 2>&1; "
-                    f"then echo fetched; else echo nothing; fi >> {net_shared}/got.txt; sleep 1; done")
+        # each line is appended by a shell inside the sandbox, so it is on disk as it is written
+        net_loop = (f"while true; do if wget -q -O- -T 4 {net_url} >/dev/null 2>&1; "
+                    f"then echo fetched; else echo nothing; fi >>{net_shared}/got.txt; sleep 1; done")
         status, output = run(f"flatpak run --command=/bin/sh --filesystem={net_shared} {app_id} "
-                             f"-c '{net_loop}' < /dev/null > ~/flatpak-loop.txt 2>&1 &; disown",
+                             f"-c '{net_loop}' </dev/null >~/floop.txt 2>&1 &; disown",
                              "a flatpak app that goes on fetching")
         if status != 0:
             fail(f"the flatpak app that goes on fetching could not be started: {without_console(output).strip()!r}")
@@ -9567,7 +9576,7 @@ def main():
                 if len(lines) == 2 and lines[0] == wanted and lines[1] == wanted:
                     return True
                 time.sleep(1)
-            _, output = run(f"cat {net_shared}/got.txt; cat ~/flatpak-loop.txt", f"what the running app wrote for {what}")
+            _, output = run(f"cat {net_shared}/got.txt ~/floop.txt", f"what the running app wrote for {what}")
             fail(f"the running flatpak app did not say {wanted} for {what}: {without_console(output).strip()[-400:]!r}")
             return False
 
@@ -9587,9 +9596,7 @@ def main():
         if net_units[0] not in net_table:
             fail(f"airlock's table does not hold {net_units[0]}")
         net_last(120, "nothing", "the running app after its network was off")
-        net_listed = net_rows(f"the switch with {app_id} off while it runs")
-        if net_listed.get(app_id) != ("Flatpak", "Off", "1"):
-            fail(f"rift net does not list {app_id} off with one running: {net_listed}")
+        net_until(("Flatpak", "Off", "1"), f"the switch with {app_id} off while it runs")
 
         # the Privacy page lists it under its own name, with the switch the page turns back on
         if args.desktop and args.lens:
@@ -9603,9 +9610,10 @@ def main():
                             .get(app_id) == ("off", "flatpak")):
                 fail(f"the Privacy page does not list {app_id} as a Flatpak app with its network off: "
                      f"{privacy_page('the page once more')}")
-            look(f"{SETTINGS_APP} on the Privacy page with a Flatpak app on the switch",
-                 f"{flatpak_stem}-settings-privacy-flatpak{flatpak_extension}", 60,
-                 apps=[SETTINGS_APP], journals=("horizon",), settle=3)
+            # a plain screendump: the photograph is the desktop again by now, and the window check
+            # finds the gaps between windows by the flat gray of the desktop
+            time.sleep(3)
+            shot(f"{flatpak_stem}-settings-privacy-flatpak{flatpak_extension}", "settings-privacy-flatpak")
             run(f"rift-settings --set app-network {app_id} on", f"{app_id}'s network on from the page")
             if not wait_for(120, lambda: (privacy_page("the page after the switch") or ({}, {}, {}))[2]
                             .get(app_id) == ("on", "flatpak")):
