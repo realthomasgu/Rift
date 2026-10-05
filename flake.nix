@@ -59,6 +59,7 @@
             ./nix/profiles/tools.nix
             ./nix/profiles/basics.nix
             ./nix/profiles/welcome.nix
+            ./nix/profiles/store.nix
             ./nix/profiles/files.nix
             ./nix/profiles/phase0.nix
           ];
