@@ -19,6 +19,7 @@
 pub mod access;
 pub mod airlock;
 pub mod appearance;
+pub mod appimage;
 // desktop entries and icon themes are how a freedesktop session finds its apps, which rift-flash
 // has no use for when it is built for Windows
 #[cfg(unix)]
