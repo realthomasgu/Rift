@@ -1,0 +1,28 @@
+[package]
+name = "store"
+description = "Store: the apps Rift suggests, Flathub, and what an app asks for before it is installed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rift-store"
+path = "src/main.rs"
+
+[dependencies]
+# flatpak, what an app asks for, the list of apps Rift suggests, and dark or light with the accent
+librift = { workspace = true, features = ["suggested"] }
+# the colours, the rows and the icons Settings draws with too
+rift-ui = { workspace = true }
+
+# a normal window, drawn in software like the shell so no gpu driver is needed, which can close
+# while apps go on installing. svg draws the symbolic icons, and png is the only picture format
+# read
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "thread-pool", "wayland", "svg", "image-without-codecs", "advanced"] }
+image = { version = "0.25.9", default-features = false, features = ["png"] }
+
+[lints]
+workspace = true

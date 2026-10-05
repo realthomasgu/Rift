@@ -13,6 +13,7 @@ members = [
   "crates/settings",
   "crates/rift-ui",
   "crates/welcome",
+  "crates/store",
   "crates/files",
   "crates/liftoff-splash",
   "crates/liftoff-style",
