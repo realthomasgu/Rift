@@ -1,0 +1,62 @@
+name: probe
+on:
+  workflow_dispatch:
+
+jobs:
+  appimage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build the test's appimage and look at it
+        run: |
+          set +e
+          nix build .#test-appimage -o test-appimage -L
+          echo "build: $?"
+          file=$(ls test-appimage/*.AppImage)
+          echo "file: $file"
+          ls -lL "$file"
+          echo "--- the first sixteen bytes ---"
+          xxd -l 16 "$file"
+          echo "--- what readelf says ---"
+          readelf -h "$file" | head -20
+          echo "--- the offset appimage-run unpacks at ---"
+          LC_ALL=C readelf -h "$file" | awk 'NR==13 { shoff = $5 } NR==18 { size = $5 } NR==19 { count = $5 } END { print shoff + size * count }'
+          echo "--- unsquashfs can read it there ---"
+          offset=$(LC_ALL=C readelf -h "$file" | awk 'NR==13 { shoff = $5 } NR==18 { size = $5 } NR==19 { count = $5 } END { print shoff + size * count }')
+          nix shell --inputs-from . nixpkgs#squashfsTools -c unsquashfs -l -o "$offset" "$file"
+          echo "unsquashfs: $?"
+      - name: Run it with the image's own appimage-run
+        run: |
+          set +e
+          # a user namespace is refused on an ubuntu runner by apparmor, and appimage-run's
+          # environment is a bwrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          nix build --inputs-from . nixpkgs#appimage-run -o air -L
+          echo "appimage-run build: $?"
+          file=$(ls test-appimage/*.AppImage)
+          echo "--- extract ---"
+          ./air/bin/appimage-run -x /tmp/unpacked "$file"
+          echo "extract: $?"
+          ls -l /tmp/unpacked /tmp/unpacked/usr/bin
+          echo "--- what the program inside asks for ---"
+          readelf -l /tmp/unpacked/usr/bin/rift-test-appimage | grep -i interpreter
+          echo "--- run it through appimage-run ---"
+          ./air/bin/appimage-run "$file"
+          echo "run: $?"
+          cat "$HOME/appimage-ran.txt"
+          echo "wrote: $?"
+          echo "--- the runtime on its own ---"
+          chmod +x "$file"
+          "$file"
+          echo "runtime: $?"
+      - name: What the binfmt rule would match
+        run: |
+          set +e
+          nix eval --raw '.#nixosConfigurations.rift.config.environment.etc."binfmt.d/nixos.conf".source'
+          echo
+          cat "$(nix eval --raw '.#nixosConfigurations.rift.config.environment.etc."binfmt.d/nixos.conf".source')"
+          echo "rules: $?"
