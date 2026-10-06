@@ -46,7 +46,9 @@ pub mod files;
 #[cfg(unix)]
 pub mod flatpak;
 pub mod ghost;
-// what this machine is, out of sysfs, for the hardware report `rift doctor --report` writes
+// what this machine is, out of sysfs and procfs, for the hardware report `rift doctor --report`
+// writes. both of those are linux's, and rift-flash has no use for them on the other two systems
+#[cfg(unix)]
 pub mod hw;
 #[cfg(unix)]
 pub mod icons;
