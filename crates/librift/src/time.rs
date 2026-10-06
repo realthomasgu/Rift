@@ -14,6 +14,12 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// The day the clock says it is, in UTC, as `2026-10-06`. The date a hardware report carries.
+#[must_use]
+pub fn today() -> String {
+    crate::search::date(now().saturating_mul(1_000_000_000))
+}
+
 /// A span of seconds the way a person says it about the past. A span that has not happened yet,
 /// which a clock that was put back gives, is just now.
 #[must_use]
@@ -74,6 +80,15 @@ mod tests {
             assert!(until(second) >= Duration::from_millis(1_200));
             assert!(until(second) <= Duration::from_millis(60_200));
         }
+    }
+
+    #[test]
+    fn today_is_the_day_in_utc() {
+        let today = today();
+        assert_eq!(today.len(), 10, "{today}");
+        // after the day this was written, and this century
+        assert!(today.as_str() > "2026-10-05", "{today}");
+        assert!(today.starts_with("20"), "{today}");
     }
 
     #[test]

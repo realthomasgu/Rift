@@ -3805,6 +3805,9 @@ def main():
     if output.group(4, 5) != ("32", "20"):
         fail(f"the bus says the output is {output.group(4)} by {output.group(5)} cm, "
              "qemu's edid says 32 by 20")
+    # the connector, its mode, its size in centimetres and the size it is drawn at, kept for the
+    # steps further down: `output` is the name a dozen commands put what they printed in
+    screen = output.group(1, 2, 3, 4, 5, 6)
     ok(
         f"host profile {fingerprint[:12]}, {machine}, class {klass}, gpu {gpu_path}, "
         f"ai tier {ai_tier}, output {output.group(1)} {output.group(4)}x{output.group(5)} cm "
@@ -4192,6 +4195,62 @@ def main():
     if "Quasar" not in rows or (args.models and rows["Quasar"] != "Passed"):
         fail(f"rift doctor says Quasar {rows.get('Quasar')}, expected Passed")
     ok("rift doctor: " + ", ".join(f"{name} {verdict}" for name, verdict in rows.items()))
+
+    # 4b1. `rift doctor --report`: the hardware report for this machine, which here is a virtual
+    # one. it prints the whole of a file under hw/ on stdout and the name that file wants on
+    # stderr, and the facts in its table are the ones orbit and the kernel gave above
+    reported_version = image_version()
+    status, printed = run("rift doctor --report", "rift doctor --report")
+    printed = without_console(printed)
+    print(f"\nboot-test: rift doctor --report printed:\n{printed}", flush=True)
+    if status != 0:
+        fail(f"rift doctor --report exited with {status}")
+    if not re.search(r"^# QEMU Standard PC", printed, re.M):
+        fail(f"the report does not start with the machine: {printed.strip()[:200]!r}")
+    # a row of the table of facts. only the first pipe after the label is a boundary, since a
+    # value may hold one of its own
+    report_rows = dict(re.findall(r"^\| ([^|\n]+?) \| (.+?) \|$", printed, re.M))
+    said = f"{screen[0]}, {screen[1]}x{screen[2]}, {screen[3]}x{screen[4]} cm"
+    facts = [
+        ("Date", r"^\d{4}-\d{2}-\d{2}$"),
+        ("Rift version", rf"^{re.escape(reported_version)}$"),
+        ("Kernel", r"^\d+\.\d+"),
+        ("Machine", r"^QEMU Standard PC .*, desktop$"),
+        # the drive is an nvme one: qemu's emulated usb storage returns bad blocks under verity
+        ("Drive", r"^nvme, .*\d GiB$"),
+        ("Firmware", r"secure boot (on|off|unknown)$"),
+        # the cpu names itself whether it is emulated or the runner's own
+        ("CPU", r"\S, \d+ threads$"),
+        ("RAM", r"^\d+\.\d+ GiB$"),
+        ("GPU", r"^[0-9a-f]{4}:[0-9a-f]{4}, \S+$"),
+        # no virtual machine has a wireless card, and none can be given one
+        ("Wi-Fi", r"^none$"),
+        ("Display(s)", rf"^{re.escape(said)}, .*scale {screen[5]}$"),
+    ]
+    if not args.offline:
+        facts.append(("Ethernet", r"^[0-9a-f]{4}:[0-9a-f]{4}, \S+$"))
+    for label, pattern in facts:
+        if not re.search(pattern, report_rows.get(label, "")):
+            fail(f"the report's {label} row is {report_rows.get(label)!r}, expected {pattern}")
+    for heading in ("## Verdict", "## What worked", "## What didn't", "## Notes for Orbit",
+                    "## PCI", "## USB"):
+        if heading not in printed:
+            fail(f"the report has no {heading} section")
+    if "Boots: yes." not in printed:
+        fail("the report's verdict does not say the machine boots")
+    # the checks of rift doctor are in the report, and so is what orbit decided for this machine
+    if not re.search(r"^\d+ checks, \d+ passed", printed, re.M):
+        fail("the report does not carry the checks of rift doctor")
+    notes = f"class {klass}, graphics {gpu_path} and AI tier {ai_tier}"
+    if notes not in printed:
+        fail(f"the report's notes for Orbit do not say {notes!r}")
+    if not re.search(r"^[0-9a-f]{2}:[0-9a-f]{2}\.\d [0-9a-f]{6} [0-9a-f]{4}:[0-9a-f]{4} ",
+                     printed, re.M):
+        fail("the report's PCI listing has no device in it")
+    if "This machine's report is hw/qemu-standard-pc" not in printed:
+        fail("rift doctor --report does not say which file this machine's report is")
+    ok(f"rift doctor --report: {report_rows['Machine']}; {report_rows['Drive']}; "
+       f"{report_rows['RAM']}; {report_rows['Display(s)']}")
 
     # 5. the desktop. greetd runs horizon on tty1 as the owner. horizon needs a moment to open the gpu
     # and paint its first frame, so the screendump is retried until it shows the background

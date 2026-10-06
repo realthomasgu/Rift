@@ -8,6 +8,7 @@ members = [
   "crates/airlock",
   "crates/vault",
   "crates/rift-cli",
+  "crates/hw-site",
   "crates/rift-flash",
   "crates/rift-flash-app",
   "crates/settings",

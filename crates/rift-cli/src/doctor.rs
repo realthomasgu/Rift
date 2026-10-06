@@ -14,9 +14,9 @@ use std::process::{Command, ExitCode};
 use librift::quasar::{self, Status};
 use librift::{ghost, orbit, paths};
 
-use crate::text;
+use crate::{hardware, text};
 
-const USAGE: &str = "Usage: rift doctor";
+const USAGE: &str = "Usage: rift doctor [--report]";
 
 /// Persist fails with less free space than the first number, in percent, and warns under the
 /// second.
@@ -30,14 +30,14 @@ const CPU_STALL: f64 = 50.0;
 const IO_STALL: f64 = 25.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Verdict {
+pub enum Verdict {
     Passed,
     Warning,
     Failed,
 }
 
 impl Verdict {
-    fn word(self) -> &'static str {
+    pub fn word(self) -> &'static str {
         match self {
             Self::Passed => "Passed",
             Self::Warning => "Warning",
@@ -47,10 +47,10 @@ impl Verdict {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Check {
-    name: &'static str,
-    verdict: Verdict,
-    detail: String,
+pub struct Check {
+    pub name: &'static str,
+    pub verdict: Verdict,
+    pub detail: String,
 }
 
 impl Check {
@@ -69,15 +69,33 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("--help" | "-h") => {
             println!(
                 "{USAGE}\n\nChecks the services, the drive and the machine, one row per check. \
-                 Exits with 1 when a check failed."
+                 Exits with 1 when a check failed. --report prints what this machine is instead: \
+                 the hardware report for it, in markdown, with these checks inside it."
             );
             return ExitCode::SUCCESS;
         }
+        Some("--report") => return hardware::run(),
         Some(other) => return text::unknown("doctor", other, USAGE),
     }
-    let mountinfo = read("/proc/self/mountinfo");
     let ghost = ghost::on();
-    let checks = [
+    let checks = checks(ghost);
+    print!("{}", report(&checks, ghost));
+    exit(&checks)
+}
+
+/// 1 when a check failed, 0 when none did. A warning is a number worth a look, not a fault.
+pub fn exit(checks: &[Check]) -> ExitCode {
+    if checks.iter().any(|check| check.verdict == Verdict::Failed) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Every check, in the order their rows are printed.
+pub fn checks(ghost: bool) -> Vec<Check> {
+    let mountinfo = read("/proc/self/mountinfo");
+    vec![
         Check::new("Orbit", orbit_verdict()),
         Check::new(
             "Quasar",
@@ -110,13 +128,7 @@ pub fn run(args: &[String]) -> ExitCode {
             pressure_verdict("IO", stall(&read("/proc/pressure/io")), IO_STALL),
         ),
         Check::new("System image", image_verdict(&mountinfo)),
-    ];
-    print!("{}", report(&checks, ghost));
-    if checks.iter().any(|check| check.verdict == Verdict::Failed) {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    ]
 }
 
 /// A file under /proc or /sys, empty when it cannot be read.
@@ -124,7 +136,7 @@ fn read(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
 
-fn report(checks: &[Check], ghost: bool) -> String {
+pub fn report(checks: &[Check], ghost: bool) -> String {
     let mut out = String::new();
     // the mode first, because it is the reason for the rows that would otherwise read as faults
     if ghost {

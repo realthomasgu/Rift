@@ -83,19 +83,22 @@
           };
           toolchain = pkgsRust.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           craneLib = (crane.mkLib pkgsRust).overrideToolchain toolchain;
-          # the cargo sources, and the logo in characters that liftoff-splash builds in
+          # the cargo sources, the logo in characters that liftoff-splash builds in, and the
+          # guide's stylesheet, which the hardware page is built with
           src = lib.cleanSourceWith {
             src = craneLib.path ./.;
             filter =
               path: type:
               craneLib.filterCargoSources path type
               || lib.hasSuffix "/nix/liftoff/logo/rift-logo.txt" (toString path)
-              || lib.hasSuffix "/nix/liftoff/logo/rift-logo.colours" (toString path);
+              || lib.hasSuffix "/nix/liftoff/logo/rift-logo.colours" (toString path)
+              || lib.hasSuffix "/nix/guide/style.css" (toString path);
           };
           # the compositor is built apart from the small crates: it pulls in smithay and a dozen
           # system libraries, and the rest of the workspace should stay cheap to build and check. the
-          # rift-flash app runs on other systems, not on the drive, and ci builds it on all three
-          firstParty = "--workspace --exclude horizon --exclude niri-config --exclude niri-ipc --exclude rift-flash-app";
+          # rift-flash app runs on other systems, not on the drive, and ci builds it on all three.
+          # hw-site reads the reports in hw/ and belongs to the website, so it is built in ci too
+          firstParty = "--workspace --exclude horizon --exclude niri-config --exclude niri-ipc --exclude rift-flash-app --exclude hw-site";
           common = {
             inherit src;
             strictDeps = true;

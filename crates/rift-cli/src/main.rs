@@ -8,6 +8,7 @@ mod backup;
 mod clone;
 mod doctor;
 mod guide;
+mod hardware;
 mod host;
 mod net;
 mod restore;

@@ -1,0 +1,19 @@
+[package]
+name = "hw-site"
+description = "Builds the hardware page of the website out of the reports in hw/"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "hw-site"
+path = "src/main.rs"
+
+# nothing. it reads the markdown of the reports and writes one page, and runs in CI and on a
+# person's machine rather than on the drive
+
+[lints]
+workspace = true

@@ -46,6 +46,8 @@ pub mod files;
 #[cfg(unix)]
 pub mod flatpak;
 pub mod ghost;
+// what this machine is, out of sysfs, for the hardware report `rift doctor --report` writes
+pub mod hw;
 #[cfg(unix)]
 pub mod icons;
 pub mod keyboard;

@@ -50,6 +50,6 @@ splash-assets:
 pin-models:
     tools/pin-models.sh
 
-# Write a hardware report for the machine this runs on (Linux, needs root)
-hw-report:
-    sudo tools/hw-report.sh
+# Build the hardware page of the website from the reports in hw/
+hw-site PAGE:
+    cargo run -q -p hw-site -- hw {{PAGE}}

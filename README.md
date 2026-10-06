@@ -238,7 +238,7 @@ Rift is in active development ahead of its first public release.
 
 ## Reporting problems
 
-Bugs and feature requests are tracked in [GitHub issues](https://github.com/officialthomasguthrie/Rift/issues). Reports of how Rift runs on specific hardware are especially useful; the form for them is [`hw/TEMPLATE.md`](hw/TEMPLATE.md).
+Bugs and feature requests are tracked in [GitHub issues](https://github.com/officialthomasguthrie/Rift/issues). Reports of how Rift runs on specific hardware are especially useful. `rift doctor --report` on the machine writes one in the shape of [`hw/TEMPLATE.md`](hw/TEMPLATE.md), and the reports already in [`hw/`](hw/) say which machines Rift has run on.
 
 ## License
 
